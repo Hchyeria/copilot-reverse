@@ -19,8 +19,9 @@ import { readAccessMode, readAccessKey, setAccessMode as persistAccessMode, rota
 import type { NetworkInfo } from "../tui/screens/network.js";
 import { CopilotTokenStore, isCopilotTokenValid } from "../providers/copilot/token.js";
 import { fetchGithubUser, skuLabel, formatIdentity } from "../providers/copilot/account.js";
-import { fetchCopilotModels, fetchModelLimits } from "../providers/copilot/models.js";
+import { fetchCopilotModels, fetchModelLimits, fetchCopilotModelCatalog, type CopilotModelInfo } from "../providers/copilot/models.js";
 import { applyClaude, applyCodex, resetClaude, resetCodex, CLAUDE_ENV_KEYS, CODEX_ENV_KEYS, type Scope } from "../tui/setup/apply.js";
+import { applyPi, resetPi } from "../tui/setup/pi-config.js";
 import { installSkill as installSkillFile } from "../tui/skills/install.js";
 import type { SkillEntry } from "../tui/skills/catalog.js";
 import { readClientStatus } from "../tui/setup/status.js";
@@ -120,11 +121,14 @@ async function launchTui(): Promise<void> {
   const endpoint = { host: cfg.bindHost, port: cfg.workerPort, apiKey: "copilot-reverse-local" };
   let app: { unmount: () => void } | undefined;
   const quit = () => { stopSupervisor?.(); app?.unmount(); process.exit(0); };
-  // Restore a client's config: strip copilot-reverse's keys from BOTH scopes and clear the HUD flag.
-  const resetClient = async (clientKind: SetupClient): Promise<string[]> => {
-    const fn = clientKind === "claude" ? resetClaude : resetCodex;
-    const keys = clientKind === "claude" ? CLAUDE_ENV_KEYS : CODEX_ENV_KEYS;
-    const results = (["global", "project"] as Scope[]).map((scope) => fn(scope, keys));
+  // Restore a client's config: strip copilot-reverse's keys and clear the HUD flag. Claude and Codex
+  // are env-key based and live in two scopes; pi is a single user-scoped models.json whose providers we
+  // own outright, so it's a one-file removal.
+  const resetClient = async (clientKind: SetupClient | "pi"): Promise<string[]> => {
+    const results = clientKind === "pi"
+      ? [resetPi()]
+      : (["global", "project"] as Scope[]).map((scope) =>
+          clientKind === "claude" ? resetClaude(scope, CLAUDE_ENV_KEYS) : resetCodex(scope, CODEX_ENV_KEYS));
     writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), [clientKind]: false });
     const lines = results
       .filter((r) => r.changed.length)
@@ -212,6 +216,17 @@ async function launchTui(): Promise<void> {
   };
   const setup = { apply: async (clientKind: SetupClient, scope: Scope, model: string) => applyClient(clientKind, scope, model) };
 
+  // pi setup: the picker needs each model's FULL upstream definition (window, output cap, vision,
+  // reasoning levels), not just an id, because a models.json entry must state all of it up front.
+  const setupPi = {
+    loadCatalog: async (): Promise<CopilotModelInfo[]> => fetchCopilotModelCatalog(await tokenStore.get()),
+    apply: async (models: CopilotModelInfo[]) => {
+      const r = applyPi(models, endpoint);
+      writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), pi: true });
+      return r;
+    },
+  };
+
   const onChat = makeOnChat(
     {
       client, workerBaseUrl: anthropicBase, apiKey: "copilot-reverse-local", model: DEFAULT_MODEL,
@@ -254,7 +269,7 @@ async function launchTui(): Promise<void> {
     tokenValid: true,
     webSearch: resolveWebSearchBackend(readWebSearchMode(dataDir()), Boolean(readWebIqKey(dataDir()))),
     worker: "ready",
-    clients: { claude: clientStatus.claude.user || clientStatus.claude.project, codex: clientStatus.codex.user || clientStatus.codex.project },
+    clients: { claude: clientStatus.claude.user || clientStatus.claude.project, codex: clientStatus.codex.user || clientStatus.codex.project, pi: clientStatus.pi.user },
     identity: account.identity,
     plan: account.plan,
   });
@@ -273,6 +288,8 @@ async function launchTui(): Promise<void> {
       setup,
       // Install a bundled agent skill into ~/.claude/skills (global) or ./.claude/skills (project).
       installSkill: async (scope: Scope, entry: SkillEntry) => installSkillFile(scope, entry),
+      // Add Copilot models to pi's ~/.pi/agent/models.json as two custom providers (anthropic + openai).
+      setupPi,
       info: {
         openai: openaiBase,
         anthropic: anthropicBase,

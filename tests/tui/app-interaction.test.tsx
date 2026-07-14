@@ -17,7 +17,7 @@ function reg(extra?: (r: Registry) => void) {
   return r;
 }
 const STATUS = (over: Partial<ClientStatus> = {}): ClientStatus => ({
-  claude: { user: false, project: false }, codex: { user: false, project: false }, ...over,
+  claude: { user: false, project: false }, codex: { user: false, project: false }, pi: { user: false, project: false }, ...over,
 });
 
 describe("TUI: HUD client badges (from the real status fn)", () => {

@@ -127,7 +127,7 @@ describe("cardRows", () => {
 });
 
 describe("sameStatus (poll bail-out → no idle re-render → no /metrics flicker)", () => {
-  const base = { claude: { user: true, project: false, userModel: "claude-opus-4-8" }, codex: { user: false, project: false } };
+  const base = { claude: { user: true, project: false, userModel: "claude-opus-4-8" }, codex: { user: false, project: false }, pi: { user: false, project: false } };
   it("is true for an unchanged config read (the common idle-poll case)", () => {
     // readStatus() returns a FRESH object every 2s tick; sameStatus must compare by VALUE so the poll
     // skips setState and the frame doesn't repaint — that whole-frame repaint is the flicker.
@@ -154,7 +154,7 @@ describe("/metrics card is stable across status polls (no flicker)", () => {
     const win = { total: 250, errors: 2, tokensIn: 1_000_000, tokensOut: 500_000, byModel: [{ model: "claude-opus-4-8", count: 250, avgMs: 40, tokensIn: 1_000_000, tokensOut: 500_000 }] };
     const metricsSource = async () => ({ all: win, day: win, recentErrors: [] });
     const statusSource = async () => ({ workerState: "ready" as const, restarts: [], github: { ok: true, hasToken: true, checkedAt: 1, detail: "ok" } });
-    const readStatus = () => ({ claude: { user: true, project: false, userModel: "claude-opus-4-8" }, codex: { user: false, project: false } });
+    const readStatus = () => ({ claude: { user: true, project: false, userModel: "claude-opus-4-8" }, codex: { user: false, project: false }, pi: { user: false, project: false } });
     const { stdin, lastFrame } = render(
       <App registry={reg()} title="m" metricsSource={metricsSource as any} statusSource={statusSource} readStatus={readStatus} />,
     );

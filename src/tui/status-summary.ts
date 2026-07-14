@@ -15,7 +15,7 @@ export interface StatusInputs {
   tokenValid: boolean;     // that token still exchanges for a Copilot token (network-checked upstream)
   webSearch: WebSearchBackend; // resolved active backend (copilot | webiq | unavailable)
   worker: WorkerState;
-  clients: { claude: boolean; codex: boolean };
+  clients: { claude: boolean; codex: boolean; pi: boolean };
   // Optional account facts folded into the GitHub line when present. `identity` is the pre-formatted
   // "Name (login)" (or just the login); `plan` is the friendly Copilot plan label (from sku). Both are
   // best-effort — absent when the lookups fail or before they resolve, and the card omits them cleanly.
@@ -27,7 +27,7 @@ export interface StatusSummary {
   github: GithubLoginState;
   webSearch: WebSearchState;
   worker: WorkerState;
-  clients: { claude: boolean; codex: boolean };
+  clients: { claude: boolean; codex: boolean; pi: boolean };
   identity?: string;
   plan?: string;
 }

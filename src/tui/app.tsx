@@ -8,7 +8,9 @@ import { ConfigScreen, type ConfigInfo } from "./screens/config.js";
 import { WebIqKeyScreen } from "./screens/webiq-key.js";
 import { NetworkScreen, type NetworkInfo, type NetworkAction } from "./screens/network.js";
 import { SkillScreen } from "./screens/skill.js";
+import { PiScreen } from "./screens/pi.js";
 import type { SkillEntry } from "./skills/catalog.js";
+import type { CopilotModelInfo } from "../providers/copilot/models.js";
 import { summarizeStatus, githubLoginState, type StatusSummary, type GithubLoginState } from "./status-summary.js";
 import { remoteConfigBlocks } from "./setup/remote-config.js";
 import type { Scope, ApplyResult } from "./setup/apply.js";
@@ -27,13 +29,13 @@ type Entry =
   | { type: "metrics"; agg: Aggregate; day: Aggregate; errors: string[] }
   | { type: "help"; commands: CommandHint[] };
 
-type Screen = { kind: "model" } | { kind: "setup"; client: SetupClient } | { kind: "config" } | { kind: "webiq-key" } | { kind: "network" } | { kind: "skill" } | null;
+type Screen = { kind: "model" } | { kind: "setup"; client: SetupClient } | { kind: "config" } | { kind: "webiq-key" } | { kind: "network" } | { kind: "skill" } | { kind: "pi" } | null;
 
 const stateColor: Record<WorkerState, string> = {
   ready: theme.ready, starting: theme.starting, crashed: theme.crashed, unhealthy: theme.unhealthy,
 };
 
-const EMPTY_STATUS: ClientStatus = { claude: { user: false, project: false }, codex: { user: false, project: false } };
+const EMPTY_STATUS: ClientStatus = { claude: { user: false, project: false }, codex: { user: false, project: false }, pi: { user: false, project: false } };
 const SPINNER = ["✶", "✸", "✹", "✺", "✹", "✷"];
 
 // The 2s status poll re-reads the config files and would call setStatus with a FRESH object every tick.
@@ -44,7 +46,7 @@ const SPINNER = ["✶", "✸", "✹", "✺", "✹", "✷"];
 const sameScope = (a: ScopeStatus, b: ScopeStatus): boolean =>
   a.user === b.user && a.project === b.project && a.userModel === b.userModel && a.projectModel === b.projectModel;
 export const sameStatus = (a: ClientStatus, b: ClientStatus): boolean =>
-  sameScope(a.claude, b.claude) && sameScope(a.codex, b.codex);
+  sameScope(a.claude, b.claude) && sameScope(a.codex, b.codex) && sameScope(a.pi, b.pi);
 
 // Startup overview card. GitHub shows a login STATE (no real token expiry exists). Web search shows
 // the resolved backend: "via WebIQ", "via Copilot (native)", or "unavailable — run /webiq".
@@ -58,9 +60,10 @@ function statusCard(s: StatusSummary, extra: string[] = [], clients?: ClientStat
   const web = s.webSearch === "webiq" ? "✓ via WebIQ" : s.webSearch === "copilot" ? "✓ via Copilot (native)" : "✗ unavailable — run /webiq";
   // Per-scope + model when we have the file-derived detail; else fall back to the simple flag.
   const scope = (sc?: { on: boolean; model?: string }) => sc?.on ? `✓ ${sc.model ? sc.model.replace(/\[1m\]$/, "") : "on"}` : "○";
+  // pi shows a user cell only — it has no project-scoped config to report (see setup/status.ts).
   const clientsLine = clients
-    ? `claude u:${scope({ on: clients.claude.user, model: clients.claude.userModel })} p:${scope({ on: clients.claude.project, model: clients.claude.projectModel })} · codex u:${scope({ on: clients.codex.user, model: clients.codex.userModel })} p:${scope({ on: clients.codex.project, model: clients.codex.projectModel })}`
-    : `claude ${s.clients.claude ? "✓" : "○"}  codex ${s.clients.codex ? "✓" : "○"}`;
+    ? `claude u:${scope({ on: clients.claude.user, model: clients.claude.userModel })} p:${scope({ on: clients.claude.project, model: clients.claude.projectModel })} · codex u:${scope({ on: clients.codex.user, model: clients.codex.userModel })} p:${scope({ on: clients.codex.project, model: clients.codex.projectModel })} · pi u:${scope({ on: clients.pi.user, model: clients.pi.userModel })}`
+    : `claude ${s.clients.claude ? "✓" : "○"}  codex ${s.clients.codex ? "✓" : "○"}  pi ${s.clients.pi ? "✓" : "○"}`;
   const tone: "ok" | "error" = s.github === "connected" ? "ok" : "error";
   return { type: "card", title: "status", tone, lines: [
     `GitHub login   ${ghLine}`,
@@ -92,6 +95,9 @@ export interface AppProps {
   // Install a bundled agent skill into a client's skills dir. Optional → the /setup-skill surface is
   // hidden when a host doesn't wire it (the command falls through to its stub message).
   installSkill?: (scope: Scope, entry: SkillEntry) => Promise<ApplyResult>;
+  // Add the chosen Copilot models to pi's ~/.pi/agent/models.json. Optional → the /setup-pi surface is
+  // hidden when a host doesn't wire it (the command falls through to its stub message), like installSkill.
+  setupPi?: { loadCatalog: () => Promise<CopilotModelInfo[]>; apply: (models: CopilotModelInfo[]) => Promise<ApplyResult> };
   info?: ConfigInfo;
   onModelChange?: (model: string) => void;
   pickModelOnStart?: boolean;
@@ -217,14 +223,16 @@ function HelpCard({ commands }: { commands: CommandHint[] }) {
 }
 
 // HUD client cell: shows configured scopes read from the real config files, with the pinned model.
-function ClientBadge({ name, status }: { name: string; status: { user: boolean; project: boolean; userModel?: string; projectModel?: string } }) {
+// `userOnly` drops the project cell for a client that has no project-scoped config at all (pi) — an
+// always-"○" cell there would read as "off", when the truth is "no such thing".
+function ClientBadge({ name, status, userOnly }: { name: string; status: { user: boolean; project: boolean; userModel?: string; projectModel?: string }; userOnly?: boolean }) {
   const short = (m?: string) => (m ? m.replace(/\[1m\]$/, "").replace(/^claude-/, "").slice(0, 14) : "");
   const cell = (label: string, on: boolean, model?: string) => (
     <Text color={on ? theme.ready : theme.muted}>{label}:{on ? `✓ ${short(model)}`.trimEnd() : "○"}</Text>
   );
   return (
     <Text color={theme.muted}>
-      {name} {cell("u", status.user, status.userModel)} {cell("p", status.project, status.projectModel)}
+      {name} {cell("u", status.user, status.userModel)} {userOnly ? null : cell("p", status.project, status.projectModel)}
     </Text>
   );
 }
@@ -232,7 +240,7 @@ function ClientBadge({ name, status }: { name: string; status: { user: boolean; 
 export function App({
   registry, title, workerState = "starting", initialModel = "—",
   statusSource, metricsSource, readStatus, modelLimits, onChat,
-  loadModels, setup, installSkill, info, onModelChange, pickModelOnStart, login, enableWebiq, disableWebiq, webSearchBackend, networkInfo, setAccessMode, rotateKey, clientModels, startupStatus, githubStatus, accountInfo, changeBanner, onChangeSeen,
+  loadModels, setup, installSkill, setupPi, info, onModelChange, pickModelOnStart, login, enableWebiq, disableWebiq, webSearchBackend, networkInfo, setAccessMode, rotateKey, clientModels, startupStatus, githubStatus, accountInfo, changeBanner, onChangeSeen,
 }: AppProps) {
   const cmds: CommandHint[] = registry.list().map((c) => ({ name: c.name, describe: c.describe }));
   const [entries, setEntries] = useState<Entry[]>(() => [
@@ -325,7 +333,7 @@ export function App({
       const summary = summarizeStatus({
         hasToken: ghState !== "signed-out", tokenValid: ghState === "connected",
         webSearch: webSearchBackend?.() ?? webBackend, worker,
-        clients: { claude: status.claude.user || status.claude.project, codex: status.codex.user || status.codex.project },
+        clients: { claude: status.claude.user || status.claude.project, codex: status.codex.user || status.codex.project, pi: status.pi.user },
         identity: acct.identity ?? startupStatus?.identity,
         plan: acct.plan ?? startupStatus?.plan,
       });
@@ -360,13 +368,14 @@ export function App({
       return;
     }
     if (t === "/setup-skill" && installSkill) { setScreen({ kind: "skill" }); return; }
+    if (t === "/setup-pi" && setupPi) { setScreen({ kind: "pi" }); return; }
     if (line.startsWith("/")) {
       if (t === "/help") { add({ type: "help", commands: cmds }); return; }
       const out = await registry.run(line);
       const tone: "info" | "ok" | "error" =
         out.some((l) => /fail|error|unknown/i.test(l)) ? "error" : out.some((l) => /^OK /.test(l)) ? "ok" : "info";
       add({ type: "card", title: t, tone, lines: out });
-      if (t === "/reset-claude" || t === "/reset-codex") refreshStatus(); // HUD follows the files
+      if (t === "/reset-claude" || t === "/reset-codex" || t === "/reset-pi") refreshStatus(); // HUD follows the files
     } else if (onChat) {
       // Open one streaming bubble immediately (shows the live loading line), then append each
       // delta into it in place rather than spawning a new line per chunk.
@@ -419,13 +428,14 @@ export function App({
       <ConfigScreen
         info={info}
         model={model}
-        clients={{ claude: configured(status.claude), codex: configured(status.codex) }}
+        clients={{ claude: configured(status.claude), codex: configured(status.codex), pi: status.pi.user }}
         accessMode={net?.mode}
         onAction={(a) => {
           if (a === "model") setScreen({ kind: "model" });
           else if (a === "network" && networkInfo) { setNet(networkInfo()); setScreen({ kind: "network" }); }
           else if (a === "setup-claude") setScreen({ kind: "setup", client: "claude" });
           else if (a === "setup-codex") setScreen({ kind: "setup", client: "codex" });
+          else if (a === "setup-pi" && setupPi) setScreen({ kind: "pi" });
           else setScreen(null);
         }}
       />
@@ -498,6 +508,25 @@ export function App({
         onCancel={() => { setScreen(null); add({ type: "system", text: "skill install cancelled" }); }}
       />
     );
+  } else if (screen?.kind === "pi" && setupPi) {
+    body = (
+      <PiScreen
+        loadCatalog={setupPi.loadCatalog}
+        apply={setupPi.apply}
+        current={model}
+        onDone={(result, models) => {
+          refreshStatus();
+          setScreen(null);
+          add({ type: "card", title: "setup pi", tone: "ok", lines: [
+            `✓ ${models.length} model${models.length === 1 ? "" : "s"} added`,
+            `wrote ${result.path}`,
+            `providers: ${result.changed.join(", ")}`,
+            "pi picks them up on its next launch — select one with /model inside pi, or pass --provider/--model.",
+          ] });
+        }}
+        onCancel={() => { setScreen(null); add({ type: "system", text: "pi setup cancelled" }); }}
+      />
+    );
   } else {
     body = <Repl onSubmit={handle} commands={cmds} />;
   }
@@ -545,6 +574,7 @@ export function App({
           <Text color={theme.muted}>web </Text><Text color={webBackend === "unavailable" ? theme.muted : theme.ready}>{webBackend === "webiq" ? "✓ webiq" : webBackend === "copilot" ? "✓ copilot" : "✗ /webiq"}</Text>
           <Text color={theme.muted}>  ·  </Text><ClientBadge name="claude" status={status.claude} />
           <Text color={theme.muted}>  </Text><ClientBadge name="codex" status={status.codex} />
+          <Text color={theme.muted}>  </Text><ClientBadge name="pi" status={status.pi} userOnly />
           <Text color={theme.muted}>  ·  /help</Text>
         </Box>
       </Box>

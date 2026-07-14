@@ -2,7 +2,7 @@ import { createWorkerApp } from "./server.js";
 import { Router } from "./router.js";
 import { CopilotAdapter } from "../providers/copilot/adapter.js";
 import { CopilotTokenStore } from "../providers/copilot/token.js";
-import { fetchCopilotModels, fetchModelEndpoints, fetchModelReasoningSupport, fetchModelOneMSupport } from "../providers/copilot/models.js";
+import { fetchModelDiscovery } from "../providers/copilot/models.js";
 import { readGhToken } from "../shared/creds.js";
 import { readWebIqKey, readWebSearchMode, resolveWebSearchBackend } from "../shared/webiq-key.js";
 import { readAccessMode, readAccessKey } from "../shared/network.js";
@@ -36,13 +36,19 @@ const router = new Router([new CopilotAdapter(tokenStore, fetch, (m) => modelEnd
 // Load the live model list so the router can fuzzy-match near-miss ids (e.g. dated Anthropic ids), the
 // endpoint map so the adapter can route per model, the reasoning-support set so it only sends
 // reasoning_effort where accepted, and the 1M set so the picker badges 1M models from real capabilities.
-// One token fetch feeds all four.
+// ONE fetch feeds all four (it used to be four concurrent requests for the same payload, which Copilot
+// serializes — so under a slow upstream they all raced the same 8s timeout and degraded together).
+// On failure we leave the router with NO model list, so a requested id passes through untouched.
+// Populating it with FALLBACK_MODELS instead would be actively harmful: those ids are dashed, and the
+// router fuzzy-matches against whatever list it has — turning a valid claude-opus-4.8 into a
+// claude-opus-4-8 that Copilot rejects with 400 "model_not_supported".
 void tokenStore.get().then(async (t) => {
-  const [ids, endpoints, reasoning, oneM] = await Promise.all([fetchCopilotModels(t), fetchModelEndpoints(t), fetchModelReasoningSupport(t), fetchModelOneMSupport(t)]);
-  router.setAvailableModels(ids);
-  router.setOneMModels(oneM);
-  modelEndpoints = endpoints;
-  reasoningModels = reasoning;
+  const d = await fetchModelDiscovery(t);
+  if (!d) return;
+  router.setAvailableModels(d.ids);
+  router.setOneMModels(d.oneM);
+  modelEndpoints = d.endpoints;
+  reasoningModels = d.reasoning;
 }).catch(() => {});
 // Gateway-run web_search / web_fetch. The backend is resolved per call (lazy → /webiq toggles need no
 // restart): currently WebIQ when a key is set, else unavailable (Copilot borrow is disabled — see

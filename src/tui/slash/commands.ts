@@ -12,7 +12,7 @@ export interface RegistryOpts {
   appVersion?: string;
   platform?: string;
   openUrl?: (url: string) => void;  // injectable for tests
-  resetClient?: (client: "claude" | "codex") => Promise<string[]>; // restore client config
+  resetClient?: (client: "claude" | "codex" | "pi") => Promise<string[]>; // restore client config
   login?: () => Promise<string[]>;  // re-run GitHub device-code login
   logout?: () => Promise<string[]>; // clear the stored GitHub token
 }
@@ -64,8 +64,12 @@ export function buildRegistry(ctx: SlashContext, endpoint: Endpoint, opts: Regis
   // Opens the skill picker (handled in the App, like /config) — a no-op stub so the command is
   // recognized and listed in /help + autocomplete rather than reported as unknown.
   reg.add({ name: "/setup-skill", describe: "install a bundled agent skill into Claude Code", run: async () => ["opening skill picker…"] });
+  // Also handled in the App (it opens a model multi-select), so this stub only exists to keep the
+  // command listed in /help + autocomplete instead of being reported as unknown.
+  reg.add({ name: "/setup-pi", describe: "add Copilot models to pi (~/.pi/agent/models.json)", run: async () => ["opening pi model picker…"] });
   reg.add({ name: "/reset-claude", describe: "restore Claude Code config (remove copilot-reverse's keys)", run: async () => opts.resetClient ? opts.resetClient("claude") : ["reset not available"] });
   reg.add({ name: "/reset-codex", describe: "restore Codex/OpenAI config (remove copilot-reverse's keys)", run: async () => opts.resetClient ? opts.resetClient("codex") : ["reset not available"] });
+  reg.add({ name: "/reset-pi", describe: "restore pi config (remove copilot-reverse's providers)", run: async () => opts.resetClient ? opts.resetClient("pi") : ["reset not available"] });
   reg.add({ name: "/login", describe: "sign in to GitHub (device-code)", run: async () => opts.login ? opts.login() : ["login not available"] });
   reg.add({ name: "/logout", describe: "sign out — remove the stored GitHub token", run: async () => opts.logout ? opts.logout() : ["logout not available"] });
   reg.add({ name: "/model", describe: "switch the chat model", run: async () => ["opening model picker…"] });
