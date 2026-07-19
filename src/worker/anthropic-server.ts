@@ -9,7 +9,7 @@ import { editImageContextInPlace, forceClearAllScreenshots, is413Error } from ".
 import { errorHint, classifyError } from "./errors.js";
 import { isGatewayTool, type GatewayToolRunner } from "../core/server-tools.js";
 import type { ContentBlock, CanonicalChunk } from "../core/canonical.js";
-import { RunawayGuard } from "../core/stream-guard.js";
+import { RunawayGuard, runawayErrorText } from "../core/stream-guard.js";
 import { toCanonical } from "../core/model-canonical.js";
 
 const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -46,7 +46,11 @@ const MAX_TOOL_ITERS = 5;
 // same short token forever ("code\ncode\ncode…") and never sends a stop, which would otherwise relay
 // for minutes and freeze the client. The RunawayGuard catches the repetition fast; this is the
 // backstop for any slow-but-endless stream. On either trip we end the turn cleanly as max_tokens.
-const STREAM_DEADLINE_MS = 120_000;
+// Sized for the worst LEGITIMATE case: a large model (Opus over a 1M window) streaming reasoning +
+// a long answer can run well past two minutes without degenerating, and cutting it early looked to
+// the user like a broken model. 10 minutes leaves genuine long turns intact while still bounding a
+// truly endless stream.
+const STREAM_DEADLINE_MS = 600_000;
 
 export function mountAnthropic(app: Express, router: Router, onMetric: MetricSink, runner?: GatewayToolRunner): void {
   // Model discovery — Anthropic list shape. Claude Desktop / Anthropic-protocol clients GET this
@@ -219,7 +223,7 @@ export function mountAnthropic(app: Express, router: Router, onMetric: MetricSin
         res.write(frame("message_delta", { type: "message_delta", delta: { stop_reason: finalStop === "tool_use" ? "tool_use" : finalStop === "length" ? "max_tokens" : "end_turn" }, usage: deltaUsage }));
         res.write(frame("message_stop", { type: "message_stop" }));
         res.end();
-        metric(200, { tokensIn: inputTokens, tokensOut: sumCompletion, error: runaway ? `runaway stream cut (${runawayReason}) — model degenerated, ended early as max_tokens` : undefined });
+        metric(200, { tokensIn: inputTokens, tokensOut: sumCompletion, error: runaway ? runawayErrorText(runawayReason) : undefined });
       } else {
         // Non-stream: same gateway loop without SSE — run gateway tools and re-complete until the
         // model answers with text (or a client tool), capped identically.
