@@ -1,16 +1,28 @@
 import type { ProviderAdapter } from "../providers/types.js";
 import { bestModelMatch } from "../core/fuzzy.js";
 import { FALLBACK_MODELS } from "../providers/copilot/models.js";
-import { stripOneM, DEFAULT_ONE_M_MODELS } from "../core/model-canonical.js";
+import { stripOneM, DEFAULT_ONE_M_MODELS, toCanonical, type CanonicalModel } from "../core/model-canonical.js";
+import { availableClaudeMappings, backendForClaudeAlias, resolveClaudeModelMap, type ClaudeModelMap } from "../core/claude-model-map.js";
+
+export interface RouterOptions {
+  claudeMapEnabled?: boolean;
+  claudeModelMap?: ClaudeModelMap;
+}
 
 // M1: single provider. Model name is remapped to the provider's actual id.
 export class Router {
   private available: string[] = [];
   // Dashed canonical ids advertising a ~1M window, from live discovery. Empty until the fetch resolves.
   private oneM = new Set<string>();
-  constructor(private providers: ProviderAdapter[], private modelMap: Record<string, string>) {}
+  private limits: Record<string, number> = {};
+  private liveDiscovery = false;
+  private claudeModelMap: ClaudeModelMap;
+  constructor(private providers: ProviderAdapter[], private modelMap: Record<string, string>, private opts: RouterOptions = {}) {
+    this.claudeModelMap = opts.claudeModelMap ?? resolveClaudeModelMap();
+  }
   // The live Copilot model list, used for fuzzy matching (set once fetched at worker startup).
-  setAvailableModels(ids: string[]): void { this.available = ids; }
+  setAvailableModels(ids: string[], live = true): void { this.available = ids; this.liveDiscovery = live; }
+  setModelLimits(limits: Record<string, number>): void { this.limits = { ...limits }; }
   // The set of models with a 1M window, from discovery. Ids arrive in Copilot's DOTTED form; store them
   // DASHED so is1M can compare against the canonical dashed ids the /v1/models mapper works with.
   setOneMModels(dottedIds: Iterable<string>): void {
@@ -22,13 +34,44 @@ export class Router {
   is1M(dashed: string): boolean {
     return this.oneM.size ? this.oneM.has(dashed) : DEFAULT_ONE_M_MODELS.has(dashed);
   }
-  // Model ids to advertise from the /models discovery endpoints. Falls back to a curated list
-  // until the live fetch resolves, so discovery never returns an empty list.
+  // Real model ids only. OpenAI/Codex discovery must never see synthesized Claude aliases.
   listModels(): string[] { return this.available.length ? this.available : FALLBACK_MODELS; }
+
+  private realClaudeModel(alias: string): string | undefined {
+    return this.available.find((model) => model.replace(/\./g, "-") === alias);
+  }
+
+  // Anthropic discovery starts with the exact existing canonicalized list. When compatibility is enabled,
+  // append only aliases whose exact GPT targets were observed in LIVE discovery. A real Copilot Claude id
+  // always wins a name collision: compatibility must never replace or reroute a genuine model.
+  listAnthropicModels(): CanonicalModel[] {
+    const real = this.listModels().map((id) => toCanonical(id, (d) => this.is1M(d)));
+    if (!this.opts.claudeMapEnabled || !this.liveDiscovery) return real;
+    for (const { alias, backend } of availableClaudeMappings(this.available, this.claudeModelMap)) {
+      if (this.realClaudeModel(alias)) continue;
+      const limit = this.limits[backend];
+      real.push(toCanonical(alias, limit === undefined ? undefined : () => limit > 800_000));
+    }
+    return real;
+  }
+
+  modelLimit(model: string): number | undefined {
+    const alias = stripOneM(model);
+    const real = this.realClaudeModel(alias);
+    const backend = !real && this.opts.claudeMapEnabled && this.liveDiscovery
+      ? backendForClaudeAlias(alias, this.available, this.claudeModelMap)
+      : undefined;
+    return this.limits[backend ?? real ?? alias];
+  }
+
   resolveModel(requested: string): string {
     // Claude Code appends [1m] to signal its 1M context window; Copilot doesn't know that id, so
     // strip it back to the canonical model before mapping/forwarding.
     requested = stripOneM(requested);
+    if (this.opts.claudeMapEnabled && this.liveDiscovery && !this.realClaudeModel(requested)) {
+      const backend = backendForClaudeAlias(requested, this.available, this.claudeModelMap);
+      if (backend) return backend;
+    }
     const mapped = this.modelMap[requested];
     if (mapped) return mapped;
     // Fuzzy-match a near-miss id (e.g. canonical claude-opus-4-8 -> Copilot claude-opus-4.8) to a real model.

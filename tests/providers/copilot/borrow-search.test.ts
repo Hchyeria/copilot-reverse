@@ -68,10 +68,57 @@ describe("borrowSearch", () => {
     expect(out).toEqual({ ok: true, sources: extractCitations(searchResult.output), text: "The Rust 2024 edition shipped in Rust 1.85." });
   });
 
+
+  it("uses the session inference origin for borrowed search", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({ token: "enterprise-token", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" }),
+    };
+    const f = vi.fn(async () => okResponse());
+
+    await borrowSearch(source, "query", f as unknown as typeof fetch);
+
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/responses");
+    expect((f.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: "Bearer enterprise-token" });
+  });
+
   it("returns ok with empty sources when nothing was cited", async () => {
     const f = vi.fn(async () => new Response(JSON.stringify({ output: [{ type: "message", content: [{ type: "output_text", text: "no citations" }] }] }), { status: 200 }));
     const out = await borrowSearch(tokenStore, "q", f as unknown as typeof fetch);
     expect(out).toEqual({ ok: true, sources: [], text: "no citations" });
+  });
+
+
+  it("keeps structured diagnostics while redacting a multi-line bearer token sentinel", async () => {
+    const token = "enterprise-token-sentinel";
+    const source = { get: async () => token };
+    const body = JSON.stringify({ error: { code: "search_failed", message: `first ${token}
+second ${token}` } });
+    const f = vi.fn(async () => new Response(body, { status: 400 }));
+    const out = await borrowSearch(source, "query", f as unknown as typeof fetch);
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.error).toContain("search_failed: first [REDACTED] second [REDACTED]");
+      expect(out.error).not.toContain(token);
+      expect(out.error).not.toContain("\n");
+    }
+  });
+
+  it("does not include the bearer token or raw upstream body in borrow errors", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({ token: "enterprise-secret", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" }),
+    };
+    const f = vi.fn(async () => new Response("raw-upstream-secret-body", { status: 500 }));
+
+    const out = await borrowSearch(source, "query", f as unknown as typeof fetch);
+
+    expect(out.ok).toBe(false);
+    if (!out.ok) {
+      expect(out.error).toMatch(/borrow search failed: 500/);
+      expect(out.error).not.toContain("enterprise-secret");
+      expect(out.error).not.toContain("raw-upstream-secret-body");
+    }
   });
 
   it("returns an error string (not a throw) on a non-ok response", async () => {

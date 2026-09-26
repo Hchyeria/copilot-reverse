@@ -8,6 +8,17 @@ describe("fetchGithubUser", () => {
     const f = vi.fn(async () => json({ login: "canwa_microsoft", name: "Can Wang", id: 1 }));
     expect(await fetchGithubUser("gho", f as unknown as typeof fetch)).toEqual({ login: "canwa_microsoft", name: "Can Wang" });
   });
+
+  it("uses the selected GHE.com REST origin for /user", async () => {
+    const f = vi.fn(async () => json({ login: "enterprise-user" }));
+    const auth = { connection: { type: "ghecom", host: "acme.ghe.com" } as const, token: "ghe-secret" };
+
+    await expect(fetchGithubUser(auth, f as unknown as typeof fetch)).resolves.toEqual({ login: "enterprise-user", name: null });
+
+    expect(f.mock.calls[0][0]).toBe("https://api.acme.ghe.com/user");
+    expect((f.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: "token ghe-secret" });
+  });
+
   it("maps a missing name to null (keeps the login)", async () => {
     const f = vi.fn(async () => json({ login: "handle" }));
     expect(await fetchGithubUser("gho", f as unknown as typeof fetch)).toEqual({ login: "handle", name: null });

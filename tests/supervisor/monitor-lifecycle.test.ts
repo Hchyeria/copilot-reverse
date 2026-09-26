@@ -99,16 +99,43 @@ describe("WorkerMonitor lifecycle", () => {
     m.stop();
   });
 
-  it("manual restart spawns a fresh instance and resets the crash counter", async () => {
+  it("manual restart resolves only after the fresh worker reports ready", async () => {
     const { h, states } = hooks();
     process.env.FAKE_MODE = "ready";
     const m = new WorkerMonitor(cfg(), fixture, h);
     m.start();
     await waitFor(() => states.includes("ready"));
     const readyCount1 = states.filter((s) => s === "ready").length;
-    m.restartManually();
-    await waitFor(() => states.filter((s) => s === "ready").length > readyCount1);
+    let resolved = false;
+    const restarting = m.restartManually().then(() => { resolved = true; });
+    await delay(10);
+    expect(resolved).toBe(false);
+    await restarting;
     expect(states.filter((s) => s === "ready").length).toBeGreaterThan(readyCount1);
+    m.stop();
+  });
+
+  it("manual restart rejects when the replacement crashes before ready", async () => {
+    const { h, states } = hooks();
+    process.env.FAKE_MODE = "ready";
+    const m = new WorkerMonitor(cfg({ baseBackoffMs: 1_000 }), fixture, h);
+    m.start();
+    await waitFor(() => states.includes("ready"));
+    process.env.FAKE_MODE = "instant";
+    await expect(m.restartManually()).rejects.toThrow(/before ready/i);
+    m.stop();
+  });
+
+  it("concurrent manual restarts share the same readiness result", async () => {
+    const { h, states } = hooks();
+    process.env.FAKE_MODE = "ready";
+    const m = new WorkerMonitor(cfg(), fixture, h);
+    m.start();
+    await waitFor(() => states.includes("ready"));
+    const first = m.restartManually();
+    const second = m.restartManually();
+    expect(second).toBe(first);
+    await first;
     m.stop();
   });
 

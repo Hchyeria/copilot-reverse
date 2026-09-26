@@ -27,6 +27,12 @@ describe("toCanonical (outbound /v1/models)", () => {
   it("badges a known single-segment 1M id (sonnet-5) from the default set, no oracle needed", () => {
     expect(toCanonical("claude-sonnet-5")).toEqual({ id: "claude-sonnet-5[1m]", display_name: "Sonnet 5" });
   });
+  it("badges opus-5 from the default set, no oracle needed", () => {
+    expect(toCanonical("claude-opus-5")).toEqual({ id: "claude-opus-5[1m]", display_name: "Opus 5" });
+  });
+  it("recognizes the current Fable 5.1 identity and its 1M window without a live oracle", () => {
+    expect(toCanonical("claude-fable-5-1")).toEqual({ id: "claude-fable-5-1[1m]", display_name: "Fable 5.1" });
+  });
   it("names an unknown future family from its id, no badge until an oracle says 1M", () => {
     expect(toCanonical("claude-fable-5")).toEqual({ id: "claude-fable-5", display_name: "Fable 5" });
   });

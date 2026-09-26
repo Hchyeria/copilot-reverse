@@ -7,9 +7,10 @@ import { EventBus } from "./events.js";
 import { createControlApp } from "./api.js";
 import { defaultConfig, workerBindHost } from "../shared/config.js";
 import { dataDir, dbPath } from "../shared/paths.js";
-import { readGhToken } from "../shared/creds.js";
+import { readGitHubConnection } from "../shared/creds.js";
 import { readAccessMode } from "../shared/network.js";
-import { probeGithubAuth } from "../providers/copilot/token.js";
+import { probeGitHubConnection } from "../worker/copilot-session.js";
+import { ghAuth } from "../cli/gh-auth.js";
 import { GithubHeartbeat, SIGNED_OUT_DETAIL } from "./github-heartbeat.js";
 import { appendCrashLog } from "../shared/crash-log.js";
 import { buildDoctorChecks } from "./doctor.js";
@@ -51,9 +52,14 @@ export function startSupervisor(): { stop: () => void } {
   // Periodically re-check the GitHub token so the UI reflects an expired/revoked login within ~60s,
   // instead of only on the next failed request or a manual /status. Declared before doctor() so the
   // light /doctor can reuse its cached status instead of hammering GitHub on the 2s dashboard poll.
-  const heartbeat = new GithubHeartbeat(() => readGhToken(dataDir()), probeGithubAuth, undefined, {
-    intervalMs: config.heartbeat.intervalMs, initialDelayMs: config.heartbeat.initialDelayMs,
-  });
+  const heartbeat = new GithubHeartbeat(
+    () => readGitHubConnection(dataDir()),
+    (connection) => typeof connection === "string"
+      ? probeGitHubConnection({ type: "github", token: connection }, ghAuth)
+      : probeGitHubConnection(connection, ghAuth),
+    undefined,
+    { intervalMs: config.heartbeat.intervalMs, initialDelayMs: config.heartbeat.initialDelayMs },
+  );
 
   // Advertised models, proxied from the worker (same source the picker uses) — shared by /doctor's
   // "models" check and the dashboard's /api/models panel so they never disagree.
@@ -68,19 +74,14 @@ export function startSupervisor(): { stop: () => void } {
   const doctor = async (ping = false): Promise<DoctorCheck[]> =>
     buildDoctorChecks({
       githubAuth: async (live) => {
-        const gh = readGhToken(dataDir());
-        if (!gh) return { ok: false, detail: SIGNED_OUT_DETAIL };
-        // Light path (dashboard poll): reuse the heartbeat's cached result — a fresh token exchange
-        // every 2s would trip GitHub's rate limit (the heartbeat runs on a 60s cadence for exactly this
-        // reason). On-demand /doctor (live) does a fresh exchange so the user gets an authoritative,
-        // up-to-the-second answer; it shares probeGithubAuth's classifier so both paths agree.
+        const connection = readGitHubConnection(dataDir());
+        if (!connection) return { ok: false, detail: SIGNED_OUT_DETAIL };
         if (!live) {
           const cached = heartbeat.current();
           if (cached) return { ok: cached.ok, detail: cached.detail };
-          // Heartbeat hasn't completed its first probe yet — token is on disk but unverified.
           return { ok: false, detail: "checking… (login probe pending)" };
         }
-        const probe = await probeGithubAuth(gh);
+        const probe = await probeGitHubConnection(connection, ghAuth);
         return { ok: probe.ok, detail: probe.detail };
       },
       workerState: () => state,

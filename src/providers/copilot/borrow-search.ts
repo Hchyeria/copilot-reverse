@@ -1,4 +1,5 @@
-import { RESPONSES_URL } from "./responses-upstream.js";
+import { copilotUrl, readCopilotSession, type CopilotSessionSource } from "./session.js";
+import { upstreamErrorDetail } from "./error-detail.js";
 
 // "Borrow" web search backend. Copilot's native web_search hosted tool works only for gpt-5-class
 // models, NOT Claude. So for Claude Code's gateway-run web_search/web_fetch, we run a gpt-5-mini
@@ -6,7 +7,6 @@ import { RESPONSES_URL } from "./responses-upstream.js";
 // feed those back to Claude as the tool_result. Claude never sees gpt-5 — it just gets grounded
 // sources using only the Copilot token (no WebIQ key needed). This is the DEFAULT Claude backend.
 
-interface TokenSource { get(): Promise<string> }
 export interface BorrowSource { title: string; url: string }
 export type BorrowOutcome = { ok: true; sources: BorrowSource[]; text: string } | { ok: false; error: string };
 
@@ -51,24 +51,23 @@ export function extractText(output: any[]): string {
 // so the gateway tool loop can degrade gracefully. Bounded by a timeout so a congested upstream (gpt-5-
 // mini is prone to "high demand" stalls) fails fast instead of hanging the whole turn for minutes.
 const DEFAULT_TIMEOUT_MS = 30_000;
-export async function borrowSearch(tokenStore: TokenSource, input: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BorrowOutcome> {
+export async function borrowSearch(tokenStore: CopilotSessionSource, input: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<BorrowOutcome> {
   if (!input.trim()) return { ok: false, error: "borrow search error: empty query" };
-  let token: string;
-  try { token = await tokenStore.get(); }
+  let session;
+  try { session = await readCopilotSession(tokenStore); }
   catch (e) { return { ok: false, error: `borrow search unavailable: ${e instanceof Error ? e.message : String(e)}` }; }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchFn(RESPONSES_URL, {
-      method: "POST", headers: headers(token), signal: ctrl.signal,
+    const res = await fetchFn(copilotUrl(session.inferenceOrigin, "/responses"), {
+      method: "POST", headers: headers(session.token), signal: ctrl.signal,
       // reasoning.effort "low" is a ~5-6x speedup (≈30s→≈5s, and far less variance) vs the default:
       // we discard gpt-5's prose and keep only the citations, so the heavy reasoning it would otherwise
       // do before/after the search is wasted. ("minimal" is rejected by the API alongside web_search.)
       body: JSON.stringify({ model: "gpt-5-mini", input, stream: false, tools: [{ type: "web_search" }], reasoning: { effort: "low" } }),
     });
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      return { ok: false, error: `borrow search failed: ${res.status}${detail ? ` — ${detail.slice(0, 200)}` : ""}` };
+      return { ok: false, error: `borrow search failed: ${res.status}${await upstreamErrorDetail(res, session.token)}` };
     }
     const data = (await res.json()) as { output?: any[] };
     return { ok: true, sources: extractCitations(data.output ?? []), text: extractText(data.output ?? []) };

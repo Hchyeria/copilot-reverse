@@ -155,6 +155,13 @@ describe("CopilotAdapter", () => {
     await a.complete({ model: "claude-opus-4.8", stream: false, messages: base.messages, reasoning: { effort: "high" } });
     expect(body.reasoning_effort).toBe("high");
   });
+  it("clamps Claude's max effort to the mapped backend's advertised ceiling", async () => {
+    let body: any;
+    const f = vi.fn(async (_u: string, init: RequestInit) => { body = JSON.parse(init.body as string); return new Response(JSON.stringify({ id: "c1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} }), { status: 200, headers: { "content-type": "application/json" } }); });
+    const a = new CopilotAdapter(tokenStore, f as unknown as typeof fetch, () => ["/chat/completions"], () => true, () => ["none", "low", "medium", "high", "xhigh"]);
+    await a.complete({ model: "gpt-5.4", stream: false, messages: base.messages, reasoning: { effort: "max" } });
+    expect(body.reasoning_effort).toBe("xhigh");
+  });
   it("defaults to sending reasoning_effort when support is unknown (no fn / pre-discovery)", async () => {
     let body: any;
     const f = vi.fn(async (_u: string, init: RequestInit) => { body = JSON.parse(init.body as string); return new Response(JSON.stringify({ id: "c1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} }), { status: 200, headers: { "content-type": "application/json" } }); });
@@ -291,6 +298,53 @@ describe("CopilotAdapter", () => {
   });
   const r55: CanonicalRequest = { model: "gpt-5.5", stream: false, messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] };
 
+
+  it("uses one session origin for enterprise chat", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: vi.fn(async () => ({ token: "enterprise-token", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" })),
+    };
+    const f = vi.fn(async () => new Response(JSON.stringify({ id: "c1", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], usage: {} }), { status: 200 }));
+    await new CopilotAdapter(source, f as unknown as typeof fetch).complete(base);
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/chat/completions");
+    expect((f.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: "Bearer enterprise-token" });
+    expect(source.getSession).toHaveBeenCalledTimes(1);
+  });
+
+
+  it("uses the enterprise session origin for streaming chat", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: vi.fn(async () => ({ token: "enterprise-token", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" })),
+    };
+    const f = vi.fn(async () => new Response("data: [DONE]\n\n", { status: 200 }));
+    const adapter = new CopilotAdapter(source, f as unknown as typeof fetch);
+
+    for await (const _ of adapter.stream({ ...base, stream: true })) { /* drain */ }
+
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/chat/completions");
+    expect((f.mock.calls[0][1] as RequestInit).headers).toMatchObject({ authorization: "Bearer enterprise-token" });
+  });
+
+  it("uses the same enterprise session for non-stream and stream Responses calls", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: vi.fn(async () => ({ token: "enterprise-token", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" })),
+    };
+    const responseJson = new Response(responsesObj("ok"), { status: 200 });
+    const responseSse = new Response('data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n', { status: 200 });
+    const f = vi.fn().mockResolvedValueOnce(responseJson).mockResolvedValueOnce(responseSse);
+    const adapter = new CopilotAdapter(source, f as unknown as typeof fetch, () => ["/responses"]);
+
+    await adapter.complete(r55);
+    for await (const _ of adapter.stream({ ...r55, stream: true })) { /* drain */ }
+
+    expect(f.mock.calls.map((call) => call[0])).toEqual([
+      "https://copilot.acme.ghe.com/responses",
+      "https://copilot.acme.ghe.com/responses",
+    ]);
+  });
+
   it("routes a responses-only model to /responses on complete()", async () => {
     const f = vi.fn(async (url: string) => new Response(responsesObj("from responses"), { status: 200, headers: { "content-type": "application/json" } }));
     const a = new CopilotAdapter(tokenStore, f as unknown as typeof fetch, () => ["/responses"]);
@@ -389,6 +443,41 @@ describe("CopilotAdapter", () => {
     expect((f.mock.calls[0][0] as string)).toBe("https://api.githubcopilot.com/chat/completions");
   });
 
+
+  it("does not include the bearer token or raw upstream body in adapter errors", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({ token: "enterprise-secret", expiresAtMs: 9_999_999_999_000, inferenceOrigin: "https://copilot.acme.ghe.com" }),
+    };
+    const f = vi.fn(async () => new Response("raw-upstream-secret-body", { status: 500 }));
+
+    const error = await new CopilotAdapter(source, f as unknown as typeof fetch).complete(base).catch((caught) => caught);
+
+    expect(String(error)).toMatch(/copilot completion failed: 500/);
+    expect(String(error)).not.toContain("enterprise-secret");
+    expect(String(error)).not.toContain("raw-upstream-secret-body");
+  });
+
+  it("keeps structured diagnostics but redacts every exact bearer token occurrence", async () => {
+    const token = "enterprise-token-sentinel";
+    const source = { get: async () => token };
+    const body = JSON.stringify({ error: { code: "endpoint_failed", message: `first ${token}
+second ${token}` } });
+    const f = vi.fn(async () => new Response(body, { status: 400, headers: { "content-type": "application/json" } }));
+    const error = await new CopilotAdapter(source, f as unknown as typeof fetch, () => []).complete(base).catch((caught) => caught);
+    expect(error.message).toContain("endpoint_failed: first [REDACTED] second [REDACTED]");
+    expect(error.message).not.toContain(token);
+    expect(error.message).not.toContain("\n");
+    expect(error.message.length).toBeLessThanOrEqual(440);
+  });
+
+  it("does not redact empty or short bearer strings from useful diagnostics", async () => {
+    const body = JSON.stringify({ error: { code: "bad", message: "a catalog entry is invalid" } });
+    const f = vi.fn(async () => new Response(body, { status: 400 }));
+    const error = await new CopilotAdapter({ get: async () => "a" }, f as unknown as typeof fetch, () => []).complete(base).catch((caught) => caught);
+    expect(error.message).toContain("bad: a catalog entry is invalid");
+  });
+
   it("flattens a multi-line HTML 502 body to a single-line error message", async () => {
     const html = '<!DOCTYPE html>\n<html>\n  <head><style>body { margin: 0 }</style></head>\n  <body>\n    <h1>502 Bad Gateway</h1>\n  </body>\n</html>';
     const f = vi.fn(async () => new Response(html, { status: 502, headers: { "content-type": "text/html" } }));
@@ -398,6 +487,7 @@ describe("CopilotAdapter", () => {
     catch (e) { msg = e instanceof Error ? e.message : String(e); }
     expect(msg).toMatch(/copilot stream failed: 502/);
     expect(msg).not.toMatch(/\n/); // no embedded newlines — won't shatter the /logs card
+    expect(msg).not.toContain("<!DOCTYPE html>"); // raw upstream body stays private
   });
 
   // #50 P1: an upstream error must carry its HTTP status so the request handlers can fast-fail a

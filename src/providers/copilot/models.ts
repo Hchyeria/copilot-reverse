@@ -1,6 +1,8 @@
+import { CopilotEndpointContractError } from "./token.js";
+import { copilotUrl, DEFAULT_COPILOT_INFERENCE_ORIGIN, readCopilotSession, type CopilotSessionSource } from "./session.js";
+
 // Live model list from Copilot. Falls back to a curated list if the endpoint is unavailable.
-const MODELS_URL = "https://api.githubcopilot.com/models";
-export const FALLBACK_MODELS = ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4-6", "claude-sonnet-5", "claude-opus-4-8", "o3-mini"];
+export const FALLBACK_MODELS = ["gpt-4o", "gpt-4o-mini", "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5", "claude-fable-5-1", "o3-mini"];
 
 const HEADERS = (token: string) => ({
   authorization: `Bearer ${token}`,
@@ -27,21 +29,27 @@ interface RawModel {
 }
 
 // A stalled Copilot endpoint must never hang the model picker forever — abort after timeoutMs.
-async function getModels(token: string, fetchFn: typeof fetch, timeoutMs: number): Promise<RawModel[] | null> {
+type TokenOrSessionSource = string | CopilotSessionSource;
+
+async function getModels(source: TokenOrSessionSource, fetchFn: typeof fetch, timeoutMs: number): Promise<RawModel[] | null> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchFn(MODELS_URL, { headers: HEADERS(token), signal: ctrl.signal });
+    const session = typeof source === "string"
+      ? { token: source, inferenceOrigin: DEFAULT_COPILOT_INFERENCE_ORIGIN }
+      : await readCopilotSession(source);
+    const res = await fetchFn(copilotUrl(session.inferenceOrigin, "/models"), { headers: HEADERS(session.token), signal: ctrl.signal });
     if (!res.ok) return null;
     return ((await res.json()) as { data?: unknown[] }).data as never ?? [];
-  } catch {
+  } catch (error) {
+    if (typeof source !== "string" && error instanceof CopilotEndpointContractError) throw error;
     return null;
   } finally {
     clearTimeout(timer);
   }
 }
 
-export async function fetchCopilotModels(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string[]> {
+export async function fetchCopilotModels(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<string[]> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return FALLBACK_MODELS;
   const ids = [...new Set(data.map((m) => m.id).filter((x): x is string => Boolean(x)))];
@@ -51,7 +59,7 @@ export async function fetchCopilotModels(token: string, fetchFn: typeof fetch = 
 // Map of model id -> the Copilot API endpoints it supports (e.g. ["/responses","ws:/responses"]).
 // Used to route each request to the right upstream: newer gpt-5.x models are /responses-only and
 // reject /chat/completions. Returns {} on failure so the adapter falls back to chat/completions.
-export async function fetchModelEndpoints(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, string[]>> {
+export async function fetchModelEndpoints(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, string[]>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return {};
   const out: Record<string, string[]> = {};
@@ -66,7 +74,7 @@ export async function fetchModelEndpoints(token: string, fetchFn: typeof fetch =
 // gpt-4o) is a hard 400 (`invalid_reasoning_effort`). Returns an empty set on failure/timeout, so the
 // adapter omits reasoning_effort until discovery resolves — safe (a turn just runs without reasoning)
 // rather than a 400. Only ids with a non-empty reasoning_effort array are included.
-export async function fetchModelReasoningSupport(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Set<string>> {
+export async function fetchModelReasoningSupport(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Set<string>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   const out = new Set<string>();
   if (!data) return out;
@@ -81,7 +89,7 @@ export async function fetchModelReasoningSupport(token: string, fetchFn: typeof 
 // instead of a hardcoded list — a new 1M model (claude-sonnet-5, or any future family) badges with zero
 // code changes. Threshold 800K matches clients.ts's context-window suffix rule (max_prompt_tokens 936K
 // also clears it). Returns an empty set on failure/timeout, so callers fall back to the default set.
-export async function fetchModelOneMSupport(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Set<string>> {
+export async function fetchModelOneMSupport(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Set<string>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   const out = new Set<string>();
   if (!data) return out;
@@ -94,7 +102,7 @@ export async function fetchModelOneMSupport(token: string, fetchFn: typeof fetch
 
 // Map of model id -> its real input/context window, used to size auto-compaction per model and
 // to show the window in the picker. Returns {} on failure/timeout so callers fall back gracefully.
-export async function fetchModelLimits(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, number>> {
+export async function fetchModelLimits(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, number>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return {};
   const out: Record<string, number> = {};
@@ -104,39 +112,6 @@ export async function fetchModelLimits(token: string, fetchFn: typeof fetch = fe
     if (m.id && typeof limit === "number") out[m.id] = limit;
   }
   return out;
-}
-
-// Everything the worker needs from /models, from ONE fetch. The selectors above each make their own
-// call, so the worker's boot used to fire four identical requests in parallel — and Copilot serializes
-// them, so all four raced the same 8s timeout and could time out together under a slow upstream.
-//
-// Returns null (not a fallback) when discovery genuinely failed, which the caller MUST distinguish:
-// fetchCopilotModels answers a failure with FALLBACK_MODELS, whose ids are DASHED. Feeding those to the
-// router as fuzzy-match targets rewrites a perfectly valid dotted id (claude-opus-4.8) into a dashed one
-// Copilot has never heard of → a hard 400 "model_not_supported". A router with NO list passes the id
-// through untouched, which is always the safer failure.
-export interface ModelDiscovery {
-  ids: string[];
-  endpoints: Record<string, string[]>;
-  reasoning: Set<string>;
-  oneM: Set<string>;
-}
-export async function fetchModelDiscovery(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<ModelDiscovery | null> {
-  const data = await getModels(token, fetchFn, timeoutMs);
-  if (!data) return null;
-  const ids: string[] = [];
-  const endpoints: Record<string, string[]> = {};
-  const reasoning = new Set<string>();
-  const oneM = new Set<string>();
-  for (const m of data) {
-    if (!m.id) continue;
-    if (!ids.includes(m.id)) ids.push(m.id);
-    if (Array.isArray(m.supported_endpoints) && m.supported_endpoints.length) endpoints[m.id] = m.supported_endpoints;
-    if (m.capabilities?.supports?.reasoning_effort?.length) reasoning.add(m.id);
-    const w = m.capabilities?.limits?.max_context_window_tokens ?? m.capabilities?.limits?.max_prompt_tokens;
-    if (typeof w === "number" && w > 800_000) oneM.add(m.id);
-  }
-  return ids.length ? { ids, endpoints, reasoning, oneM } : null;
 }
 
 // A model's FULL upstream definition. The other selectors above each project one field out of /models
@@ -161,7 +136,7 @@ const DEFAULT_MAX_OUTPUT = 16_384;
 // (capabilities.type !== "chat") so they can never reach a picker or a generated config. Returns []
 // on failure/timeout — same graceful-degradation contract as its siblings, letting a caller say "the
 // model list is unreachable" instead of writing a config built from guesses.
-export async function fetchCopilotModelCatalog(token: string, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CopilotModelInfo[]> {
+export async function fetchCopilotModelCatalog(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CopilotModelInfo[]> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return [];
   const out: CopilotModelInfo[] = [];
@@ -182,4 +157,43 @@ export async function fetchCopilotModelCatalog(token: string, fetchFn: typeof fe
     });
   }
   return out;
+}
+
+export interface CopilotModelDiscovery {
+  ids: string[];
+  // False means ids came from FALLBACK_MODELS after discovery failed. Compatibility aliases require
+  // positive live evidence, so the Router may list these ids but must not synthesize mappings from them.
+  live: boolean;
+  endpoints: Record<string, string[]>;
+  reasoning: Set<string>;
+  reasoningEfforts: Record<string, string[]>;
+  oneM: Set<string>;
+  limits: Record<string, number>;
+}
+
+// One upstream request supplies every model capability consumer. Besides avoiding five identical calls,
+// this guarantees aliases are filtered and badged from one coherent snapshot of the account's model list.
+export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CopilotModelDiscovery> {
+  const data = await getModels(token, fetchFn, timeoutMs);
+  if (!data) return { ids: FALLBACK_MODELS, live: false, endpoints: {}, reasoning: new Set(), reasoningEfforts: {}, oneM: new Set(), limits: {} };
+  const ids = [...new Set(data.map((m) => m.id).filter((id): id is string => Boolean(id)))];
+  const endpoints: Record<string, string[]> = {};
+  const reasoning = new Set<string>();
+  const reasoningEfforts: Record<string, string[]> = {};
+  const oneM = new Set<string>();
+  const limits: Record<string, number> = {};
+  for (const m of data) {
+    if (!m.id) continue;
+    if (Array.isArray(m.supported_endpoints) && m.supported_endpoints.length) endpoints[m.id] = m.supported_endpoints;
+    if (Array.isArray(m.capabilities?.supports?.reasoning_effort) && m.capabilities.supports.reasoning_effort.length) {
+      reasoning.add(m.id);
+      reasoningEfforts[m.id] = m.capabilities.supports.reasoning_effort;
+    }
+    const limit = m.capabilities?.limits?.max_context_window_tokens ?? m.capabilities?.limits?.max_prompt_tokens;
+    if (typeof limit === "number") {
+      limits[m.id] = limit;
+      if (limit > 800_000) oneM.add(m.id);
+    }
+  }
+  return { ids: ids.length ? ids : FALLBACK_MODELS, live: ids.length > 0, endpoints, reasoning, reasoningEfforts, oneM, limits };
 }

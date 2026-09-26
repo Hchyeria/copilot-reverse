@@ -1,16 +1,20 @@
 import { createWorkerApp } from "./server.js";
 import { Router } from "./router.js";
 import { CopilotAdapter } from "../providers/copilot/adapter.js";
-import { CopilotTokenStore } from "../providers/copilot/token.js";
 import { fetchModelDiscovery } from "../providers/copilot/models.js";
-import { readGhToken } from "../shared/creds.js";
+import { readGitHubConnection } from "../shared/creds.js";
+import { ghAuth } from "../cli/gh-auth.js";
 import { readWebIqKey, readWebSearchMode, resolveWebSearchBackend } from "../shared/webiq-key.js";
 import { readAccessMode, readAccessKey } from "../shared/network.js";
 import { makeGatewayRunner } from "../core/server-tools.js";
 import { borrowSearch } from "../providers/copilot/borrow-search.js";
 import { dataDir } from "../shared/paths.js";
 import { defaultConfig } from "../shared/config.js";
+import { readClaudeMapSettings } from "../shared/prefs.js";
+import { resolveClaudeModelMap } from "../core/claude-model-map.js";
 import type { WorkerToSupervisor } from "../shared/ipc.js";
+import { discoveryBeforeReady } from "./model-discovery.js";
+import { createWorkerCopilotTokenStore } from "./copilot-session.js";
 
 // Sending after the parent tore down the IPC channel throws ERR_IPC_CHANNEL_CLOSED; guard it so a
 // crash-time report can't itself become a second, masking crash.
@@ -20,10 +24,10 @@ const cfg = defaultConfig();
 const port = Number(process.env.WORKER_PORT ?? cfg.workerPort);
 const host = process.env.BIND_HOST ?? cfg.bindHost;
 
-const gh = readGhToken(dataDir());
-if (!gh) { send({ type: "error", message: "no GitHub token; run `copilot-reverse` and /login first" }); process.exit(1); }
+const connection = readGitHubConnection(dataDir());
+if (!connection) { send({ type: "error", message: "no GitHub connection; run `copilot-reverse` and /login first" }); process.exit(1); }
 
-const tokenStore = new CopilotTokenStore(gh);
+const tokenStore = createWorkerCopilotTokenStore(connection, ghAuth);
 // Per-model supported_endpoints, populated lazily from the live model list (same source as the model
 // ids). The adapter reads through this map so responses-only models (e.g. gpt-5.5) route to /responses
 // as soon as discovery resolves; until then the map is empty and the /chat 400 safety net covers it.
@@ -32,24 +36,32 @@ let modelEndpoints: Record<string, string[]> = {};
 // on this: sending it to a model without support (e.g. gpt-4o) is a hard 400. Empty until discovery
 // resolves — the adapter then defaults to "supported" so a reasoning turn isn't silently dropped.
 let reasoningModels = new Set<string>();
-const router = new Router([new CopilotAdapter(tokenStore, fetch, (m) => modelEndpoints[m] ?? [], (m) => reasoningModels.size === 0 || reasoningModels.has(m))], cfg.modelMap);
-// Load the live model list so the router can fuzzy-match near-miss ids (e.g. dated Anthropic ids), the
-// endpoint map so the adapter can route per model, the reasoning-support set so it only sends
-// reasoning_effort where accepted, and the 1M set so the picker badges 1M models from real capabilities.
-// ONE fetch feeds all four (it used to be four concurrent requests for the same payload, which Copilot
-// serializes — so under a slow upstream they all raced the same 8s timeout and degraded together).
-// On failure we leave the router with NO model list, so a requested id passes through untouched.
-// Populating it with FALLBACK_MODELS instead would be actively harmful: those ids are dashed, and the
-// router fuzzy-matches against whatever list it has — turning a valid claude-opus-4.8 into a
-// claude-opus-4-8 that Copilot rejects with 400 "model_not_supported".
-void tokenStore.get().then(async (t) => {
-  const d = await fetchModelDiscovery(t);
-  if (!d) return;
-  router.setAvailableModels(d.ids);
-  router.setOneMModels(d.oneM);
-  modelEndpoints = d.endpoints;
-  reasoningModels = d.reasoning;
-}).catch(() => {});
+let reasoningEfforts: Record<string, string[]> = {};
+const claudeMapSettings = readClaudeMapSettings(dataDir());
+const claudeMapEnabled = claudeMapSettings.enabled;
+const router = new Router(
+  [new CopilotAdapter(
+    tokenStore,
+    fetch,
+    (m) => modelEndpoints[m] ?? [],
+    (m) => reasoningModels.size === 0 || reasoningModels.has(m),
+    (m) => reasoningEfforts[m] ?? [],
+  )],
+  cfg.modelMap,
+  { claudeMapEnabled, claudeModelMap: resolveClaudeModelMap(claudeMapSettings.overrides) },
+);
+// One coherent upstream snapshot feeds fuzzy matching, endpoint/reasoning routing, and context metadata.
+// Mapped aliases are never synthesized from the offline fallback alone: Router requires a live `available`
+// list before publishing or resolving them.
+const discoverModels = () => fetchModelDiscovery(tokenStore).then((discovery) => {
+  router.setAvailableModels(discovery.ids, discovery.live);
+  router.setOneMModels(discovery.oneM);
+  router.setModelLimits(discovery.limits);
+  modelEndpoints = discovery.endpoints;
+  reasoningModels = discovery.reasoning;
+  reasoningEfforts = discovery.reasoningEfforts;
+});
+const modelDiscoveryReady = discoveryBeforeReady(claudeMapEnabled, discoverModels);
 // Gateway-run web_search / web_fetch. The backend is resolved per call (lazy → /webiq toggles need no
 // restart): currently WebIQ when a key is set, else unavailable (Copilot borrow is disabled — see
 // COPILOT_WEB_SEARCH_ENABLED). resolveWebSearchBackend centralises that policy.
@@ -67,7 +79,9 @@ const gatewayRunner = makeGatewayRunner({
 const exposed = host !== "127.0.0.1" && host !== "::1" && host !== "localhost";
 const access = { mode: () => readAccessMode(dataDir()), key: () => readAccessKey(dataDir()), exposed };
 const app = createWorkerApp(router, (m) => send({ type: "request-metric", ...m }), gatewayRunner, access);
-const server = app.listen(port, host, () => send({ type: "ready", port }));
+const server = app.listen(port, host, () => {
+  void modelDiscoveryReady.then(() => send({ type: "ready", port }));
+});
 const hb = setInterval(() => send({ type: "heartbeat", ts: Date.now() }), 5_000);
 
 process.on("message", (m: { type?: string }) => { if (m?.type === "shutdown") { clearInterval(hb); server.close(() => process.exit(0)); } });

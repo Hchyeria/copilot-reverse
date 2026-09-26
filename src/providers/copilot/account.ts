@@ -1,3 +1,5 @@
+import { githubRestOrigin, type GitHubConnection } from "../../shared/github-connection.js";
+
 // Who's logged in + what Copilot plan they're on. Both are read-only account facts surfaced on the
 // status card. The username comes from GitHub's /user; the plan (sku) rides along on the Copilot token
 // exchange we already perform (see token.ts) — no extra call is needed for it.
@@ -10,11 +12,15 @@ export interface GithubUser {
 // Fetch the authenticated user's identity. Best-effort: a failure (network, rate-limit, revoked token)
 // returns null rather than throwing — the caller shows the login state without a name, never breaks the
 // card. Timed out so a slow/hanging GitHub can't stall startup.
-export async function fetchGithubUser(ghToken: string, fetchFn: typeof fetch = fetch, timeoutMs = 5000): Promise<GithubUser | null> {
+export type GithubUserAuth = string | { connection: GitHubConnection; token: string };
+
+export async function fetchGithubUser(auth: GithubUserAuth, fetchFn: typeof fetch = fetch, timeoutMs = 5000): Promise<GithubUser | null> {
+  const ghToken = typeof auth === "string" ? auth : auth.token;
+  const restOrigin = typeof auth === "string" ? "https://api.github.com" : githubRestOrigin(auth.connection);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetchFn("https://api.github.com/user", {
+    const res = await fetchFn(`${restOrigin}/user`, {
       headers: { authorization: `token ${ghToken}`, accept: "application/json", "user-agent": "copilot-reverse" },
       signal: ctrl.signal,
     });

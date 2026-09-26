@@ -2,11 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { ProviderAdapter } from "../types.js";
 import type { CanonicalRequest, CanonicalResponse, CanonicalChunk, CanonicalMessage, ContentBlock } from "../../core/canonical.js";
 import { ToolCallExtractor, type ExtractEvent } from "../../core/tool-xml.js";
-import { canonicalToResponsesBody, parseResponsesResult, streamResponses, RESPONSES_URL } from "./responses-upstream.js";
-import { oneLine } from "../../shared/format.js";
-
-const CHAT_URL = "https://api.githubcopilot.com/chat/completions";
-interface TokenSource { get(): Promise<string> }
+import { canonicalToResponsesBody, parseResponsesResult, streamResponses } from "./responses-upstream.js";
+import { copilotUrl, readCopilotSession, type CopilotSessionSource } from "./session.js";
+import { upstreamErrorDetail } from "./error-detail.js";
+import { clampEffort } from "../../core/reasoning.js";
 
 // A non-ok HTTP response from Copilot, carrying the upstream status so the request handlers can
 // classify it: a permanent 4xx (bad model, malformed request) must surface as a TERMINAL client
@@ -29,6 +28,7 @@ type EndpointsFor = (model: string) => string[];
 // Whether a model advertises reasoning_effort support (from /models capabilities). Sending
 // reasoning_effort to a model without it (e.g. gpt-4o) is a hard 400 — gate on this.
 type SupportsReasoning = (model: string) => boolean;
+type ReasoningEffortsFor = (model: string) => string[];
 
 // A /chat 400 whose body names one of these means "this model is responses-only" — retry on /responses
 // once. Matches agent-maestro's safety net for models that drop /chat/completions from their endpoints.
@@ -88,7 +88,7 @@ function toWireMessages(messages: CanonicalMessage[]) {
   return out;
 }
 
-function buildBody(req: CanonicalRequest, supportsReasoning = true) {
+function buildBody(req: CanonicalRequest, supportsReasoning = true, supportedEfforts: string[] = []) {
   const body: any = { model: req.model, messages: toWireMessages(req.messages), stream: req.stream, temperature: req.temperature, max_tokens: req.maxTokens };
   if (req.stream) body.stream_options = { include_usage: true }; // ask Copilot for usage in the final frame
   if (req.tools?.length) body.tools = req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
@@ -96,19 +96,11 @@ function buildBody(req: CanonicalRequest, supportsReasoning = true) {
   // the model advertises reasoning_effort — sending it to a model without support (e.g. gpt-4o) is a hard
   // 400 (`invalid_reasoning_effort`). When support is unknown (discovery not yet resolved) we default to
   // true and let a real 400 surface rather than silently dropping a reasoning turn the model does support.
-  if (req.reasoning?.effort && supportsReasoning) body.reasoning_effort = req.reasoning.effort;
+  if (req.reasoning?.effort && supportsReasoning) body.reasoning_effort = clampEffort(req.reasoning.effort, supportedEfforts);
   return body;
 }
 function headers(token: string) {
   return { authorization: `Bearer ${token}`, "content-type": "application/json", "editor-version": "vscode/1.95.0", "copilot-integration-id": "vscode-chat" };
-}
-
-// Copilot puts the real reason (bad model, oversized prompt, unsupported tool, …) in the body —
-// surface it instead of a bare status code so failures are diagnosable. Flatten it to one line:
-// a 502 returns a whole HTML page, and the raw newlines would later shatter the bordered /logs card.
-async function errorDetail(res: Response): Promise<string> {
-  try { const t = oneLine(await res.text(), 400); return t ? ` — ${t}` : ""; }
-  catch { return ""; }
 }
 
 export class CopilotAdapter implements ProviderAdapter {
@@ -116,7 +108,13 @@ export class CopilotAdapter implements ProviderAdapter {
   // endpointsFor(model) -> the model's supported_endpoints (e.g. ["/responses"]). When known and it
   // omits /chat/completions, route to /responses; unknown ([]) keeps the chat path (with a 400 net).
   // supportsReasoningFn(model) -> whether the model advertises reasoning_effort (gates the /chat field).
-  constructor(private tokenStore: TokenSource, private fetchFn: typeof fetch = fetch, private endpointsFor?: EndpointsFor, private supportsReasoningFn?: SupportsReasoning) {}
+  constructor(
+    private tokenStore: CopilotSessionSource,
+    private fetchFn: typeof fetch = fetch,
+    private endpointsFor?: EndpointsFor,
+    private supportsReasoningFn?: SupportsReasoning,
+    private reasoningEffortsFor?: ReasoningEffortsFor,
+  ) {}
 
   // reasoning_effort is safe to send only when the model advertises it. Unknown (no discovery / no fn) →
   // true, so we don't silently drop a reasoning turn before discovery resolves; a real 400 would surface.
@@ -139,10 +137,10 @@ export class CopilotAdapter implements ProviderAdapter {
 
   async complete(req: CanonicalRequest): Promise<CanonicalResponse> {
     if (this.usesResponses(req.model)) return this.completeResponses(req);
-    const token = await this.tokenStore.get();
-    const res = await this.fetchFn(CHAT_URL, { method: "POST", headers: headers(token), body: JSON.stringify(buildBody({ ...req, stream: false }, this.supportsReasoning(req.model))) });
+    const session = await readCopilotSession(this.tokenStore);
+    const res = await this.fetchFn(copilotUrl(session.inferenceOrigin, "/chat/completions"), { method: "POST", headers: headers(session.token), body: JSON.stringify(buildBody({ ...req, stream: false }, this.supportsReasoning(req.model), this.reasoningEffortsFor?.(req.model))) });
     if (!res.ok) {
-      const detail = await errorDetail(res);
+      const detail = await upstreamErrorDetail(res, session.token);
       // Safety net: a responses-capable model rejected on /chat — retry once on /responses. ONLY when
       // the model actually advertises /responses; otherwise a matching 400 is a real /chat error to surface.
       if (res.status === 400 && this.canUseResponses(req.model) && RESPONSES_HINT_RE.test(detail)) return this.completeResponses(req);
@@ -180,24 +178,24 @@ export class CopilotAdapter implements ProviderAdapter {
 
   // /responses variants — used for responses-only models and as the /chat 400 safety-net target.
   private async completeResponses(req: CanonicalRequest): Promise<CanonicalResponse> {
-    const token = await this.tokenStore.get();
-    const res = await this.fetchFn(RESPONSES_URL, { method: "POST", headers: headers(token), body: JSON.stringify(canonicalToResponsesBody({ ...req, stream: false })) });
-    if (!res.ok) throw new UpstreamError(res.status, `copilot responses failed: ${res.status}${await errorDetail(res)}`);
+    const session = await readCopilotSession(this.tokenStore);
+    const res = await this.fetchFn(copilotUrl(session.inferenceOrigin, "/responses"), { method: "POST", headers: headers(session.token), body: JSON.stringify(canonicalToResponsesBody({ ...req, stream: false }, this.reasoningEffortsFor?.(req.model))) });
+    if (!res.ok) throw new UpstreamError(res.status, `copilot responses failed: ${res.status}${await upstreamErrorDetail(res, session.token)}`);
     return { ...parseResponsesResult(await res.json()), model: req.model };
   }
   private async *streamResponsesReq(req: CanonicalRequest): AsyncIterable<CanonicalChunk> {
-    const token = await this.tokenStore.get();
-    const res = await this.fetchFn(RESPONSES_URL, { method: "POST", headers: headers(token), body: JSON.stringify(canonicalToResponsesBody({ ...req, stream: true })) });
-    if (!res.ok || !res.body) throw new UpstreamError(res.status, `copilot responses stream failed: ${res.status}${await errorDetail(res)}`);
+    const session = await readCopilotSession(this.tokenStore);
+    const res = await this.fetchFn(copilotUrl(session.inferenceOrigin, "/responses"), { method: "POST", headers: headers(session.token), body: JSON.stringify(canonicalToResponsesBody({ ...req, stream: true }, this.reasoningEffortsFor?.(req.model))) });
+    if (!res.ok || !res.body) throw new UpstreamError(res.status, `copilot responses stream failed: ${res.status}${await upstreamErrorDetail(res, session.token)}`);
     yield* streamResponses(res);
   }
 
   async *stream(req: CanonicalRequest): AsyncIterable<CanonicalChunk> {
     if (this.usesResponses(req.model)) { yield* this.streamResponsesReq(req); return; }
-    const token = await this.tokenStore.get();
-    const res = await this.fetchFn(CHAT_URL, { method: "POST", headers: headers(token), body: JSON.stringify(buildBody({ ...req, stream: true }, this.supportsReasoning(req.model))) });
+    const session = await readCopilotSession(this.tokenStore);
+    const res = await this.fetchFn(copilotUrl(session.inferenceOrigin, "/chat/completions"), { method: "POST", headers: headers(session.token), body: JSON.stringify(buildBody({ ...req, stream: true }, this.supportsReasoning(req.model), this.reasoningEffortsFor?.(req.model))) });
     if (!res.ok || !res.body) {
-      const detail = await errorDetail(res);
+      const detail = await upstreamErrorDetail(res, session.token);
       if (res.status === 400 && this.canUseResponses(req.model) && RESPONSES_HINT_RE.test(detail)) { yield* this.streamResponsesReq(req); return; }
       throw new UpstreamError(res.status, `copilot stream failed: ${res.status}${detail}`);
     }

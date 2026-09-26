@@ -5,6 +5,7 @@ import {
 } from "../../src/supervisor/github-heartbeat.js";
 import type { AuthProbe } from "../../src/providers/copilot/token.js";
 import type { GithubStatus } from "../../src/shared/control-types.js";
+import type { GitHubConnection } from "../../src/shared/github-connection.js";
 
 const ok: AuthProbe = { ok: true, transient: false, detail: "token valid" };
 const expired: AuthProbe = { ok: false, transient: false, detail: "GitHub login expired" };
@@ -42,6 +43,29 @@ describe("GithubHeartbeat", () => {
     await hb.runOnce();
     expect(hb.current()).toMatchObject({ ok: true, hasToken: true });
   });
+
+  it("carries the active GHE.com hostname in status", async () => {
+    const connection: GitHubConnection = { type: "ghecom", host: "acme.ghe.com" };
+    const hb = new GithubHeartbeat(
+      () => connection,
+      async (selected) => {
+        expect(selected).toEqual(connection);
+        return ok;
+      },
+      () => 7,
+    );
+    await hb.runOnce();
+    expect(hb.current()).toEqual({ ok: true, hasToken: true, checkedAt: 7, detail: "token valid", host: "acme.ghe.com" });
+  });
+
+  it("treats a missing connection as signed out without probing", async () => {
+    const probe = vi.fn();
+    const hb = new GithubHeartbeat(() => null, probe, () => 9);
+    await hb.runOnce();
+    expect(probe).not.toHaveBeenCalled();
+    expect(hb.current()).toMatchObject({ ok: false, hasToken: false });
+    expect(hb.current()).not.toHaveProperty("host");
+  });
   it("runOnce → expired on a definitive failure", async () => {
     const hb = new GithubHeartbeat(() => "gho", async () => expired, () => 1);
     await hb.runOnce();
@@ -53,6 +77,28 @@ describe("GithubHeartbeat", () => {
     await hb.runOnce(); // connected
     await hb.runOnce(); // transient blip
     expect(hb.current()).toMatchObject({ ok: true });
+  });
+
+  it("does not carry a previous account's success across a connection switch", async () => {
+    let connection: GitHubConnection = { type: "github", token: "old" };
+    const probe = vi.fn().mockResolvedValueOnce(ok).mockResolvedValueOnce(blip);
+    const hb = new GithubHeartbeat(() => connection, probe, () => 1);
+    await hb.runOnce();
+    connection = { type: "ghecom", host: "acme.ghe.com" };
+    await hb.runOnce();
+    expect(hb.current()).toBeUndefined();
+  });
+
+  it("discards a late probe result after the active connection changes", async () => {
+    let connection: GitHubConnection = { type: "github", token: "old" };
+    let release!: (probe: AuthProbe) => void;
+    const pending = new Promise<AuthProbe>((resolve) => { release = resolve; });
+    const hb = new GithubHeartbeat(() => connection, () => pending, () => 1);
+    const run = hb.runOnce();
+    connection = { type: "ghecom", host: "acme.ghe.com" };
+    release(ok);
+    await run;
+    expect(hb.current()).toBeUndefined();
   });
   it("current() is undefined before the first probe", () => {
     const hb = new GithubHeartbeat(() => "gho", async () => ok);
@@ -70,7 +116,7 @@ describe("GithubHeartbeat", () => {
   it("runOnce clears inFlight after a throw so the next tick can still probe", async () => {
     const readToken = vi.fn()
       .mockImplementationOnce(() => { throw new Error("EBUSY"); })
-      .mockImplementationOnce(() => "gho");
+      .mockImplementation(() => "gho");
     const hb = new GithubHeartbeat(readToken as unknown as () => string | null, async () => ok, () => 1);
     await hb.runOnce(); // throws internally, swallowed
     await hb.runOnce(); // must not be blocked by a stuck inFlight flag

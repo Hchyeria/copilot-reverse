@@ -1,11 +1,19 @@
-const COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token";
-// The exchange returns the Copilot token plus a bag of entitlement flags. We only type the fields we
-// surface (sku/chat_enabled/individual); the rest are ignored.
-interface CopilotTokenResponse { token: string; expires_at: number; sku?: string; chat_enabled?: boolean; individual?: boolean }
 import type { CopilotEntitlement } from "./account.js";
+import { githubRestOrigin, type GitHubConnection } from "../../shared/github-connection.js";
+import { DEFAULT_COPILOT_INFERENCE_ORIGIN, type CopilotSession } from "./session.js";
 
-// Thrown when the stored GitHub token can no longer be exchanged for a Copilot token
-// (expired / revoked login). Carries an actionable message.
+interface CopilotTokenResponse {
+  token?: string;
+  expires_at?: number;
+  sku?: string;
+  access_type_sku?: string;
+  chat_enabled?: boolean;
+  individual?: boolean;
+  endpoints?: { api?: unknown };
+}
+
+export type { CopilotSession } from "./session.js";
+
 export class CopilotAuthError extends Error {
   constructor(public readonly status: number) {
     super(
@@ -17,69 +25,163 @@ export class CopilotAuthError extends Error {
   }
 }
 
-export class CopilotTokenStore {
-  private cached?: { token: string; expiresAtMs: number };
-  // The entitlement (plan sku, chat flag) parsed from the most recent successful exchange. Read-only
-  // account info the status card surfaces; populated as a side effect of get(), so it costs no extra
-  // network call. Undefined until the first successful exchange.
-  private entitlement?: CopilotEntitlement;
-  private readGhToken: () => string | null;
-  // Accepts either a fixed token string or a provider that is re-read on each exchange. The provider
-  // form matters when the GitHub token can change or be momentarily unreadable: a captured-once null
-  // (e.g. from a transient locked-file read at construction) would otherwise poison the store for its
-  // whole lifetime, sending `authorization: token null` forever. Re-reading recovers on the next call.
-  constructor(ghToken: string | (() => string | null), private fetchFn: typeof fetch = fetch, private nowMs: () => number = () => Date.now()) {
-    this.readGhToken = typeof ghToken === "function" ? ghToken : () => ghToken;
+export class CopilotEntitlementError extends Error {
+  readonly code = "COPILOT_ENTITLEMENT_ERROR";
+
+  constructor(connection: GitHubConnection) {
+    super(`GitHub Copilot chat is disabled for ${connection.type === "github" ? "github.com" : connection.host}.`);
+    this.name = "CopilotEntitlementError";
   }
+}
+
+export class CopilotEndpointContractError extends Error {
+  readonly code = "COPILOT_ENDPOINT_CONTRACT_ERROR";
+
+  constructor(connection: GitHubConnection) {
+    super(
+      connection.type === "ghecom"
+        ? `GitHub Copilot for ${connection.host} did not provide a supported HTTPS inference endpoint. Re-login will not fix this endpoint contract.`
+        : "GitHub Copilot returned an invalid inference endpoint.",
+    );
+    this.name = "CopilotEndpointContractError";
+  }
+}
+
+type GithubTokenProvider = string | (() => string | null | Promise<string | null>);
+
+export interface CopilotTokenStoreOptions {
+  connection?: GitHubConnection;
+}
+
+function normalizeInferenceOrigin(value: unknown, connection: GitHubConnection): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    const allowedHost = connection.type === "github" ? "githubcopilot.com" : connection.host;
+    if (
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      url.search ||
+      url.hash ||
+      (url.pathname !== "" && url.pathname !== "/") ||
+      (url.hostname !== allowedHost && !url.hostname.endsWith(`.${allowedHost}`))
+    ) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+function entitlementOf(data: CopilotTokenResponse): CopilotEntitlement | undefined {
+  const sku = data.sku ?? data.access_type_sku;
+  if (!sku) return undefined;
+  return {
+    sku,
+    chatEnabled: data.chat_enabled ?? false,
+    individual: data.individual ?? false,
+  };
+}
+
+export class CopilotTokenStore {
+  private cached?: CopilotSession;
+  private pending?: Promise<CopilotSession>;
+  private readGhToken: () => string | null | Promise<string | null>;
+  private connection: GitHubConnection;
+
+  constructor(
+    ghToken: GithubTokenProvider,
+    private fetchFn: typeof fetch = fetch,
+    private nowMs: () => number = () => Date.now(),
+    options: CopilotTokenStoreOptions = {},
+  ) {
+    this.readGhToken = typeof ghToken === "function" ? ghToken : () => ghToken;
+    this.connection = options.connection ?? { type: "github", token: typeof ghToken === "string" ? ghToken : "" };
+  }
+
   async get(): Promise<string> {
+    return (await this.getSession()).token;
+  }
+
+  async getSession(): Promise<CopilotSession> {
     const skewMs = 60_000;
-    if (this.cached && this.cached.expiresAtMs - skewMs > this.nowMs()) return this.cached.token;
-    const ghToken = this.readGhToken();
-    // No GitHub token (absent / unreadable on this read) is an auth failure, not a request with a
-    // literal "null" credential — surface it the same way an expired token would be.
+    if (this.cached && this.cached.expiresAtMs - skewMs > this.nowMs()) return this.cached;
+    if (this.pending) return this.pending;
+
+    const refresh = this.refreshSession();
+    this.pending = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.pending === refresh) this.pending = undefined;
+    }
+  }
+
+  private async refreshSession(): Promise<CopilotSession> {
+    const ghToken = await this.readGhToken();
     if (!ghToken) throw new CopilotAuthError(401);
+
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
     let res: Response;
-    try { res = await this.fetchFn(COPILOT_TOKEN_URL, { headers: { authorization: `token ${ghToken}`, accept: "application/json" }, signal: ctrl.signal }); }
-    finally { clearTimeout(timer); }
-    if (!res.ok) throw new CopilotAuthError(res.status);
+    try {
+      const url = this.connection.type === "github"
+        ? `${githubRestOrigin(this.connection)}/copilot_internal/v2/token`
+        : `https://${this.connection.host}/api/v3/copilot_internal/user`;
+      res = await this.fetchFn(url, {
+        headers: { authorization: `token ${ghToken}`, accept: "application/json" },
+        signal: ctrl.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      if (this.connection.type === "ghecom" && res.status !== 401 && res.status !== 403) {
+        throw new CopilotEndpointContractError(this.connection);
+      }
+      throw new CopilotAuthError(res.status);
+    }
+
     const data = (await res.json()) as CopilotTokenResponse;
-    this.cached = { token: data.token, expiresAtMs: data.expires_at * 1000 };
-    if (data.sku) this.entitlement = { sku: data.sku, chatEnabled: data.chat_enabled ?? false, individual: data.individual ?? false };
-    return data.token;
+    if (this.connection.type === "ghecom" && data.chat_enabled === false) {
+      throw new CopilotEntitlementError(this.connection);
+    }
+    const explicitOrigin = normalizeInferenceOrigin(data.endpoints?.api, this.connection);
+    const inferenceOrigin = explicitOrigin ?? (
+      this.connection.type === "github" && data.endpoints?.api === undefined
+        ? DEFAULT_COPILOT_INFERENCE_ORIGIN
+        : null
+    );
+    if (!inferenceOrigin) throw new CopilotEndpointContractError(this.connection);
+
+    const session: CopilotSession = {
+      token: this.connection.type === "ghecom" ? ghToken : data.token!,
+      expiresAtMs: this.connection.type === "ghecom"
+        ? this.nowMs() + 60 * 60 * 1000
+        : data.expires_at! * 1000,
+      entitlement: entitlementOf(data),
+      inferenceOrigin,
+    };
+    this.cached = session;
+    return session;
   }
 
-  // The plan entitlement from the last successful exchange, or undefined if none has succeeded yet.
-  // Does not trigger a fetch — callers that need it fresh should await get() first (a valid login makes
-  // that a cached, round-trip-free call).
-  getEntitlement(): CopilotEntitlement | undefined { return this.entitlement; }
+  getEntitlement(): CopilotEntitlement | undefined {
+    return this.cached?.entitlement;
+  }
 }
 
-// True if the stored GitHub token still exchanges for a Copilot token. A thin wrapper over
-// probeGithubAuth so the token-exchange logic lives in exactly one place.
 export async function isCopilotTokenValid(ghToken: string, fetchFn: typeof fetch = fetch): Promise<boolean> {
   return (await probeGithubAuth(ghToken, fetchFn)).ok;
 }
 
-// A classified auth check for the heartbeat. Unlike isCopilotTokenValid (a bare boolean), this
-// distinguishes a DEFINITIVE auth failure (401/403) from a TRANSIENT one (timeout / 5xx / network /
-// other). The heartbeat keeps the last-known-good status on transient errors, so a brief blip doesn't
-// flip the UI to "expired". Known limitations of this code:
-//   - The stickiness is UNBOUNDED: a SUSTAINED transient fault (a long GitHub outage, DNS down, a
-//     persistently malformed body) also never surfaces — a connected badge stays green the whole time.
-//     Only 401/403 ever flips the UI to "expired".
-//   - 403 is treated as definitive here, but GitHub also returns 403 for some rate-limits; a rate-
-//     limited 403 would therefore (incorrectly) read as "expired". (429 is correctly transient.)
 export interface AuthProbe { ok: boolean; transient: boolean; detail: string }
 export async function probeGithubAuth(ghToken: string, fetchFn: typeof fetch = fetch): Promise<AuthProbe> {
   try {
     await new CopilotTokenStore(ghToken, fetchFn).get();
     return { ok: true, transient: false, detail: "token valid" };
   } catch (e) {
-    // CopilotTokenStore throws CopilotAuthError(status) for any non-ok response, and other errors
-    // (AbortError on timeout, network failures) for the rest. We treat 401/403 as definitive auth
-    // failures; everything else is transient. See the limitations noted above.
     if (e instanceof CopilotAuthError && (e.status === 401 || e.status === 403)) {
       return { ok: false, transient: false, detail: e.message };
     }

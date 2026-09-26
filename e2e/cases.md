@@ -59,6 +59,44 @@ provider, no network. Spec: `responses.e2e.test.ts`, `describe("E2E: Codex /resp
 | EP-36 | mid-stream failure | a `data: {"type":"error"}` frame, not a silent close |
 | EP-37 | a `/responses` request | recorded in the supervisor `request_log` with `endpoint:"/openai/responses"` |
 | EP-38 | `gpt-4o[1m]` model | the `[1m]` suffix is stripped before forwarding |
+| EP-42 | tools carried in an `additional_tools` input item (Codex 0.145+ / gpt-5.6) | the tools reach the provider (not dropped); the `additional_tools` item never leaks as a message (#4231) |
+| EP-43 | prior `custom_tool_call` + `custom_tool_call_output` in `input` | round-trip to the provider as `tool_use` (raw-string input wrapped as `{input}`) + `tool_result` (#4231) |
+
+### Claude model compatibility map (EP-44 … EP-49)
+
+The map is opt-in and snapshots the persisted preference plus custom overrides at worker startup. Hermetic
+tests inject a live model list and fake provider so default/custom discovery and resolved routing are proven
+without Copilot quota.
+
+| ID | Scenario | Expected result |
+|----|----------|-----------------|
+| EP-44 | map disabled, Anthropic + OpenAI discovery | existing real-model lists are unchanged; no compatibility Claude identity is synthesized |
+| EP-45 | default map enabled with all current GPT targets live | Anthropic discovery retains real models and adds Fable 5.1, Opus 5, Sonnet 5, and Haiku 4.5; removed legacy aliases are absent; OpenAI discovery adds none |
+| EP-46 | custom Sonnet mapping is live and requested via `[1m]` | discovery publishes Sonnet 5; provider and metrics receive the custom GPT ID, not the alias |
+| EP-47 | a persisted custom target is absent from live discovery | the identity is neither advertised nor specially resolved; the stored choice can recover when its target returns |
+| EP-48 | custom backend has a sub-1M window; removed legacy aliases are submitted | Sonnet metadata/context follows the custom backend without `[1m]`; old Opus 4.8 and Sonnet 4.6 receive no compatibility routing |
+| EP-49 | live discovery already contains a real Claude model with a compatibility identity | the real Claude entry is retained once, keeps its own context metadata, and routes to the genuine Claude backend rather than the mapped GPT target |
+
+### GitHub.com and GHE.com login (EP-50 … EP-60)
+
+The login lifecycle uses one active connection. GitHub.com retains the embedded device flow and never depends on
+GitHub CLI. GHE.com stores only its validated hostname, obtains its token from `gh`, and fails closed when its
+Copilot exchange does not provide a trusted inference endpoint. Hermetic tests inject process and HTTP boundaries;
+the final cases require a real GHE.com account.
+
+| ID | Scenario | Expected result |
+|----|----------|-----------------|
+| EP-50 | Existing `{ "ghToken": "…" }` credentials start after upgrade | They resolve as the active GitHub.com connection with no migration prompt or `gh` invocation |
+| EP-51 | Interactive login selects GitHub.com while `gh` is absent | Existing device-code flow completes; no executable check, install hint, or `gh` call occurs |
+| EP-52 | Interactive login selects GHE.com while `gh` is absent | Login stops before network/auth, preserves the previous connection, and shows official GitHub CLI installation guidance |
+| EP-53 | GHE.com hostname validation matrix | A valid mixed-case `SUBDOMAIN.ghe.com` normalizes; schemes, paths, ports, credentials, root domains, malformed labels, Unicode/whitespace, and suffix lookalikes fail before credentials are read |
+| EP-54 | Successful GHE.com login | `gh auth login --hostname HOST` is invoked without a shell; only type/host metadata is persisted and no enterprise token appears in files or output |
+| EP-55 | Failed/cancelled login, connection switch, and `/logout` | Failure preserves the old connection; success atomically replaces it; logout clears only copilot-reverse state and never invokes `gh auth logout` |
+| EP-56 | Non-TTY `login` argument matrix | `--type github` works without `--host`; `--type ghecom` requires a valid `--host`; missing/contradictory arguments fail before auth |
+| EP-57 | GHE.com account and Copilot token requests | `/user` and `/copilot_internal/v2/token` use `https://api.SUBDOMAIN.ghe.com`; runtime token comes from `gh auth token --hostname HOST` and is never logged |
+| EP-58 | GHE.com exchange returns a trusted inference endpoint | Models, chat, Responses, and borrowed search all use the same validated session origin; refresh atomically replaces token and origin |
+| EP-59 | GHE.com exchange omits or returns an invalid inference endpoint | Enterprise requests fail with an endpoint-contract error before any request reaches `api.githubcopilot.com` |
+| EP-60 | Real GHE.com acceptance | Real login, identity, entitlement, discovery, Claude turn, Codex turn, tool loop, expiry recovery, and non-destructive logout all pass; otherwise release remains blocked |
 
 ### Multi-turn continuity (EP-39 … EP-41)
 
@@ -116,6 +154,7 @@ not part of `npm test`. It writes a markdown report after each run. Checks:
 | model discovery | `/anthropic/v1/models` | picker gets dashed `claude-opus-4-8[1m]`, no dotted ids leak |
 | canonical opus | `/anthropic/v1/messages` | `claude-opus-4-8[1m]` resolves to Copilot opus + answers `OPUS_OK` |
 | setup default model | `claudeCopilotReverseEnv` | the default ANTHROPIC_MODEL is dashed `claude-opus-4-8[1m]` + answers `DEFAULT_OK` |
+| newly-shipped 1M model | `/v1/models` + `claudeCopilotReverseEnv` | when upstream advertises `claude-opus-5[1m]`, the picker badges it 1M, setup emits the `[1m]` id (window-driven, not a hardcoded list), and it answers `OPUS5_OK`; `SKIP`s if opus-5 is absent from the account |
 | multi-turn `--resume` | `-p` turn 1 → `-p --resume <session_id>` turn 2 | turn 2 recalls the turn-1 codeword (`HORIZON`) — real conversation memory survives the proxy; `SKIP`s if the CLI omits `session_id` |
 | effort echoed (modern wire) | `/anthropic/v1/messages` | `output_config.effort` low/medium/high/xhigh/max each echoes in `x-copilot-reverse-effort` |
 | effort legacy budget | `/anthropic/v1/messages` | legacy `thinking.budget_tokens=16000` still maps to `high` |
@@ -127,6 +166,7 @@ not part of `npm test`. It writes a markdown report after each run. Checks:
 | claude vision OCR (downscale legibility) | `claude -p --allowedTools Read` | claude reads a 2.6MB PNG (>1.5MB gate) and still reports `BIGTEXT9` — proves the PR #44 decode+re-encode ladder keeps the image LEGIBLE, not just smaller |
 | unknown / typo'd model | `ANTHROPIC_MODEL=not-a-real-model-xyz claude -p` | a nonsense id (fuzzy < 0.6 → forwarded verbatim → Copilot 404) degrades to a bounded `is_error` and RETURNS within 90s (rc≠124), never hanging to the turn timeout — the one model-resolution branch http-e2e can't reach |
 | codex native web_search | `codex exec -c model=gpt-5 -c features.web_search=true` | the hosted `web_search` tool passes through (`responses-inbound.ts` HOSTED_TOOL_TYPES) and returns a grounded Rust `1.x` version. SKIPs if the token lacks gpt-5 web_search entitlement or the knob drifted |
+| codex gpt-5.6 `additional_tools` | `codex exec -c model=gpt-5.6 --dangerously-bypass-approvals-and-sandbox` → `/openai/responses` | codex 0.145+ sends its tools inside an `additional_tools` item (not top-level `tools`); the worker must extract them so a real shell tool loop runs and `codex56_proof.txt` (contents `CODEX56_OK`) is written. SKIPs if gpt-5.6 is absent from the account. Guards the #4231 tool-less-narration regression that cases 12/16 (default model, old wire shape) can't catch |
 
 ## HTTP edge-case Docker e2e (hermetic — no real Copilot)
 

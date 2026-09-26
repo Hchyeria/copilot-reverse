@@ -3,6 +3,58 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-26 (setup-pi merge with v0.23.2)** — resolved setup/model-discovery/TUI/worker
+  conflicts while retaining pi setup, GHE session routing, Claude model mapping, and stream deadline
+  diagnostics. Added pi-catalog coverage for the enterprise inference origin/token and fail-closed
+  endpoint contract errors. Verification under Node 26: TypeScript build clean; **949/949 full Vitest
+  tests** and **100/100 Vitest E2E passed**. Docker HTTP and live CLI E2E were not run because the
+  Docker executable is unavailable; the live CLI fidelity gate remains required before PR merge.
+
+- **2026-09-15 (GitHub.com + GHE.com login)** — added an interactive two-provider login flow while
+  preserving GitHub.com's embedded device authorization with no GitHub CLI dependency. GHE.com validates
+  `SUBDOMAIN.ghe.com`, delegates credentials to `gh`, stores only connection metadata, routes GitHub REST
+  and Copilot inference through a connection-bound session, and fails closed on missing/untrusted
+  enterprise endpoints. Verification after final review fixes: TypeScript build clean; **906/906 full
+  Vitest tests** and **100/100 Vitest E2E passed** under Node 25 (matching the installed native SQLite
+  ABI). The existing live GitHub.com integration passed **10/11**; token exchange, discovery, OpenAI,
+  Anthropic streaming/usage, tokenizer and cache guards passed, while the pre-existing nondeterministic
+  extended-thinking case returned an empty answer once. Real GHE.com (`msft.ghe.com`) verification
+  authenticated through `gh`, discovered `copilot-api.msft.ghe.com`, returned **31 live models**, and
+  completed an isolated worker Anthropic round-trip on `gpt-5.3-codex` with exact answer `GHE_OK`.
+  The actual Codex 0.145.0 and Claude Code 2.1.220 CLIs were then driven through a temporary worker on
+  port 17991 and returned exact `CODEX_GHE_OK` and `CLAUDE_GHE_OK`; a real Codex shell tool loop then
+  created a proof file containing `CODEX_GHE_TOOL_OK`. The existing 7890/7891 service was not stopped or
+  replaced. Docker verification was not run because Docker Desktop's Linux engine was unavailable.
+
+- **2026-09-07 (current Claude identities + customizable GPT map)** — `/claude-map` now opens one
+  interactive editor for the enabled state and four current identities: Fable 5.1→gpt-6-astra,
+  Opus 5→gpt-5.6-sol, Sonnet 5→gpt-5.6-sol-fast, and Haiku 4.5→gpt-5.6-luna. Per-model choices are
+  selected from live `gpt-*` discovery, persisted atomically, and hidden (not silently rerouted) while
+  unavailable. Legacy Sonnet 4.6/Opus 4.8 compatibility aliases are removed. Verification after the
+  final edits: TypeScript build clean; **765/765 full Vitest tests** and **57/57 Vitest E2E** passed;
+  Docker HTTP edge E2E **80/80 passed**. Real Docker CLI E2E against live Copilot finished with
+  **36/36 recorded checks passed, 0 FAIL (`✅ ALL PASSED`)**, proving live discovery and
+  `claude-fable-5-1[1m] → gpt-6-astra`
+  through real `claude -p`, plus chat, web search, multi-turn, effort, image transport, context editing,
+  Codex tool loops, and the final map restart case. Optional OCR/color-quality checks recorded SKIP when
+  the mapped GPT backend declined image interpretation; transport validity and no-413 remained hard PASS.
+  TUI behavior was driven through Ink interaction tests: load/error/no-GPT, edit, reset, disable,
+  cancel, save, unavailable target, stale-model healing, invalid arguments, and restart failure.
+
+- **2026-08-05 (opt-in Claude model map for GPT-only Copilot accounts)** — `/claude-map on|off`
+  persists an explicit default-off compatibility mode. When enabled, Anthropic discovery retains the
+  real GPT rows and adds only native Claude aliases whose exact GPT targets are live; alias requests
+  resolve before provider selection, so endpoint/reasoning/context capabilities and metrics use the
+  actual GPT backend. Missing targets are hidden and OpenAI/Codex discovery is unchanged. Verification:
+  **742/742 full Vitest tests**, **55/55 Vitest E2E**, TypeScript build clean; Docker HTTP edge E2E
+  **76/76 passed**; real Docker CLI E2E against live Copilot **0 FAIL (`✅ ALL PASSED`)**, including
+  Claude Code 2.1.220 discovery of `claude-opus-5[1m]`, a real `claude -p` turn through
+  `gpt-5.6-sol`, multi-turn resume, tools, effort, image transport, and Codex regressions (**34/34 recorded checks passed**). Optional OCR
+  and latest-image colour-quality assertions record SKIP under mapped GPT vision; request validity and
+  no-413 guards remain hard PASS gates. Follow-up setup regression coverage proves `/setup-claude`
+  renders the same `Claude → GPT` labels and writes the native Claude alias (not the backend id), while
+  enabling the map heals an unavailable persisted TUI model to the first live alias.
+
 - **2026-07-03 (context editing DYNAMIC budget + reactive 413 retry — issue #52 follow-up)** — issue #52
   showed the 413 returns when a screenshot-heavy session ALSO carries a large conversation. The 413 is on
   the whole request body, but context editing budgeted only image bytes against a fixed 3.5MB cap — so a

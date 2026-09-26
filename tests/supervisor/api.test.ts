@@ -47,10 +47,20 @@ describe("control api", () => {
     const res = await request(fixture().app).get("/api/status"); // fixture's github() returns undefined
     expect(res.body.github).toBeUndefined();
   });
-  it("restart action", async () => {
+  it("restart action waits for the replacement readiness result", async () => {
     const fx = fixture();
-    await request(fx.app).post("/api/restart");
+    await request(fx.app).post("/api/restart").expect(200, { ok: true });
     expect(fx.calls).toContain("restart");
+  });
+  it("restart action reports replacement startup failure", async () => {
+    const db = openDb(":memory:");
+    const app = createControlApp({
+      db, getState: () => "crashed", restart: async () => { throw new Error("worker exited before ready"); }, stop: () => {}, start: () => {},
+      doctor: async () => [], github: () => undefined, ...dash, subscribe: () => () => {},
+    });
+    const res = await request(app).post("/api/restart");
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ ok: false, error: "worker exited before ready" });
   });
   it("doctor", async () => {
     const res = await request(fixture().app).get("/api/doctor");

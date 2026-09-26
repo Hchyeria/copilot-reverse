@@ -31,7 +31,7 @@ No new API keys. No per-token bills. One terminal app — and Claude Code feels 
 npx copilot-reverse
 ```
 
-1. It asks you to log in to GitHub (device code — paste a code in your browser). One time only.
+1. Choose **GitHub.com** or **GHE.com**. GitHub.com uses a browser device code; GHE.com uses your installed [GitHub CLI](https://cli.github.com/) and asks for the `SUBDOMAIN.ghe.com` hostname.
 2. The terminal app launches. You'll see a prompt and a status bar.
 3. In the app, type:
    ```
@@ -74,14 +74,15 @@ Prefer commands? Type `/` to see them all. The essentials:
 | Command | What it does |
 |---|---|
 | `/setup-claude` · `/setup-codex` | Point Claude Code / Codex at copilot-reverse |
-| `/model` | Switch the chat model (1M-context models marked) |
+| `/model` | Switch the chat model (1M-context models marked; active Claude→GPT mappings shown) |
+| `/claude-map` | Enable and customize native Claude names backed by live GPT models |
 | `/network` | Choose access mode: localhost (private) or LAN (shared, key required) |
 | `/status` · `/doctor` | Is everything healthy? (`/status` shows each client's scope + model) |
 | `/logs` · `/metrics` | What ran, what failed, and why |
 | `/dashboard` | Open a live web dashboard in your browser |
 | `/report` | File a pre-filled bug report (diagnostics only — no prompts) |
 | `/reset-claude` · `/reset-codex` | Undo setup, restore original config |
-| `/login` · `/logout` | Sign in to GitHub (device-code) · sign out (remove token) |
+| `/login` · `/logout` | Choose GitHub.com or GHE.com · disconnect without altering GitHub CLI credentials |
 | `/help` · `/quit` | List commands · exit |
 
 ### The live dashboard
@@ -111,6 +112,14 @@ you don't trade fidelity for a free backend.
 - **🪟 True 1M-context models.** 1M-window models show up in Claude Code's native picker with the right
   badge, and copilot-reverse writes the correct context-window hint so the client sizes its context bar
   and auto-compaction to the *real* window — no more "context 100%" at 15%.
+- **🔀 Customizable Claude names for GPT-only accounts.** Run `/claude-map` to enable the feature and
+  choose a live GPT backend for each current Claude identity. Defaults are Fable 5.1→gpt-6-astra,
+  Opus 5→gpt-5.6-sol, Sonnet 5→gpt-5.6-sol-fast, and Haiku 4.5→gpt-5.6-luna. The editor lists every
+  live `gpt-*` model, supports restoring defaults, and saves all changes atomically. A configured target
+  that disappears remains saved but is marked unavailable and is neither advertised nor routed until it
+  returns. Claude Code/Desktop still see native Claude names; `/model` shows the arrows for transparency.
+  Context, reasoning, and endpoint routing follow the real GPT backend. The feature defaults **off**.
+  Reopen Claude's `/model` picker after saving (restart the client if its list is cached).
 - **🛠 Tool use, vision, web search — both directions.** Function/tool calls translate faithfully each
   way (even models that emit tool calls as inline XML are recovered), images round-trip, and
   `web_search` runs server-side through the gateway and comes back as a grounded answer — no tool leaks
@@ -203,8 +212,21 @@ assistant error: 401 authentication_error: GitHub login expired
   ↳ your GitHub login looks expired — run /login to sign in again
 ```
 
-Just type **`/login`**, complete the device-code prompt, and you're back — the worker reloads the new
-token automatically. (Switching accounts? `/logout` first, then `/login`.)
+Just type **`/login`** and choose GitHub.com or GHE.com. GitHub.com uses the device-code prompt;
+GHE.com requires `gh` and a `SUBDOMAIN.ghe.com` hostname. The worker reloads the selected connection
+automatically. `/logout` disconnects copilot-reverse but leaves any GitHub CLI credentials unchanged.
+
+For non-interactive terminals, select the provider explicitly:
+
+```bash
+copilot-reverse login --type github
+```
+
+```bash
+copilot-reverse login --type ghecom --host SUBDOMAIN.ghe.com
+```
+
+GitHub Enterprise Server (GHES) is not supported; its documented Copilot flow uses offline/BYOK providers.
 
 **A request failed and I don't know why**
 Type `/logs` (or ask *"why did that fail?"*). Every failure is captured with its real upstream

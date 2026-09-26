@@ -97,17 +97,46 @@ async function main() {
     check("/openai/models non-empty", (await jget(wrkUrl("/openai/models"))).j?.data?.length > 0);
     const models = (await jget(wrkUrl("/anthropic/v1/models"))).j?.data ?? [];
     check("/anthropic/v1/models non-empty", models.length > 0);
-    // Model mapping: Claude families must surface as the DASHED canonical ids Claude Code's native
-    // picker recognises (claude-opus-4-8) with a friendly display_name + [1m] badge for 1M models —
-    // never Copilot's dotted ids. Holds on both the live list and the offline fallback.
-    check("no dotted claude ids leak to picker", !models.some((m) => /claude-(opus|sonnet)-4\.[0-9]/.test(m.id)));
-    const opus = models.find((m) => m.id.startsWith("claude-opus-4-8"));
-    check("opus has friendly display_name", opus?.display_name === "Opus 4.8", opus?.display_name);
-    check("opus carries [1m] 1M badge", opus?.id === "claude-opus-4-8[1m]", opus?.id);
-    // Single-segment version id (claude-sonnet-5): the friendly name must not regress to a bare id, and
-    // as a known-current 1M model it must carry the [1m] badge. In the hermetic gate the dummy token
-    // fails discovery, so this rides the offline fallback list (which now lists sonnet-5) — proving the
-    // generalised display-name + default-1M path without spending quota.
+    // Deterministic quota-free proof of default-off + the live/filter gate uses the real dist Router.
+    const { Router } = await import("../../dist/worker/router.js");
+    const { readClaudeMapEnabled } = await import("../../dist/shared/prefs.js");
+    const dummyProvider = { name: "dummy", complete: async () => { throw new Error("unused"); }, async *stream() {} };
+    check("Claude compatibility map defaults off in a fresh data dir", readClaudeMapEnabled(DATA_DIR) === false);
+    const disabledMap = new Router([dummyProvider], {});
+    disabledMap.setAvailableModels(["gpt-5.6-sol", "gpt-4o"], true);
+    disabledMap.setModelLimits({ "gpt-5.6-sol": 1_100_000 });
+    check("disabled map leaves Anthropic discovery unchanged", JSON.stringify(disabledMap.listAnthropicModels().map((m) => m.id)) === JSON.stringify(["gpt-5.6-sol", "gpt-4o"]));
+    check("disabled map leaves alias requests unmapped", disabledMap.resolveModel("claude-opus-5[1m]") === "claude-opus-5");
+    // Non-live fallback ids never synthesize aliases, while a live exact GPT target does and inherits 1M.
+    const offlineMap = new Router([dummyProvider], {}, { claudeMapEnabled: true });
+    offlineMap.setAvailableModels(["gpt-5.6-sol", "gpt-4o"], false);
+    offlineMap.setModelLimits({ "gpt-5.6-sol": 1_100_000 });
+    check("map never trusts offline fallback ids", !offlineMap.listAnthropicModels().some((m) => m.id.startsWith("claude-opus-5")));
+    const customModelMap = {
+      "claude-fable-5-1": "gpt-6-astra",
+      "claude-opus-5": "gpt-5.6-sol",
+      "claude-sonnet-5": "gpt-5.5",
+      "claude-haiku-4-5": "gpt-not-live",
+    };
+    const liveMap = new Router([dummyProvider], {}, { claudeMapEnabled: true, claudeModelMap: customModelMap });
+    liveMap.setAvailableModels(["gpt-5.6-sol", "gpt-5.5", "gpt-4o"], true);
+    liveMap.setModelLimits({ "gpt-5.6-sol": 1_100_000, "gpt-5.5": 400_000 });
+    const liveAlias = liveMap.listAnthropicModels().find((m) => m.id.startsWith("claude-opus-5"));
+    const customAlias = liveMap.listAnthropicModels().find((m) => m.id.startsWith("claude-sonnet-5"));
+    check("live exact GPT target publishes native Claude alias + backend 1M badge", liveAlias?.id === "claude-opus-5[1m]" && liveAlias?.display_name === "Opus 5", JSON.stringify(liveAlias));
+    check("custom mapping publishes the identity with its backend-derived window", customAlias?.id === "claude-sonnet-5" && customAlias?.display_name === "Sonnet 5", JSON.stringify(customAlias));
+    check("mapped alias resolves to its exact GPT backend", liveMap.resolveModel("claude-opus-5[1m]") === "gpt-5.6-sol");
+    check("custom alias resolves to its configured GPT backend", liveMap.resolveModel("claude-sonnet-5") === "gpt-5.5");
+    check("OpenAI model list remains real-only under mapping", JSON.stringify(liveMap.listModels()) === JSON.stringify(["gpt-5.6-sol", "gpt-5.5", "gpt-4o"]));
+    check("missing custom GPT target hides its Claude alias", !liveMap.listAnthropicModels().some((m) => m.id.startsWith("claude-haiku-4-5")));
+    check("removed legacy aliases receive no compatibility mapping", liveMap.resolveModel("claude-opus-4-8[1m]") === "claude-opus-4-8" && liveMap.resolveModel("claude-sonnet-4-6[1m]") === "claude-sonnet-4-6");
+    // Current Claude families must surface as DASHED canonical ids with friendly names and the fallback
+    // [1m] badge when live capability discovery is unavailable — never Copilot's dotted ids.
+    check("no dotted claude ids leak to picker", !models.some((m) => /claude-(fable|opus|sonnet|haiku)-\d+\.\d+/.test(m.id)));
+    const fable = models.find((m) => m.id.startsWith("claude-fable-5-1"));
+    check("fable-5.1 present in picker", !!fable, JSON.stringify(models.map((m) => m.id)));
+    check("fable-5.1 has friendly display_name", fable?.display_name === "Fable 5.1", fable?.display_name);
+    check("fable-5.1 carries [1m] 1M badge", fable?.id === "claude-fable-5-1[1m]", fable?.id);
     const sonnet5 = models.find((m) => m.id.startsWith("claude-sonnet-5"));
     check("sonnet-5 present in picker", !!sonnet5, JSON.stringify(models.map((m) => m.id)));
     check("sonnet-5 has friendly display_name (single-segment version)", sonnet5?.display_name === "Sonnet 5", sonnet5?.display_name);
@@ -510,6 +539,34 @@ async function main() {
       check("thinking: answer delivered through the proxy (391)", sawAnswer);
       if (sawThinking) check("thinking: native thinking block + thinking_delta streamed (#33)", true, `thinking="${thinkSample}"`);
       else log(`  ⊘ thinking: upstream returned no reasoning in 4 attempts (non-deterministic) — path untested this run, answer ok`);
+
+      // Codex additional_tools (issue #4231): newer Codex (gpt-5.6 family) sends NO top-level `tools` —
+      // the tools ride inside an `additional_tools` item in `input`. If the worker drops that item the
+      // model reaches Copilot tool-less and can only narrate calls as text. Fire the EXACT wire shape a
+      // live `codex exec` sends (proven by tapping the CLI) at /openai/responses and assert a real
+      // function_call comes back — proof the tools survived translation and reached the model. The model
+      // decides per-turn, so retry a few times; a run where it just answers in text degrades to a note.
+      let sawFuncCall = false, fcName = "";
+      for (let attempt = 0; attempt < 4 && !sawFuncCall; attempt++) {
+        const rsp = await jpost(wrkUrl("/openai/responses"), JSON.stringify({
+          model: "gpt-4o", stream: true, max_output_tokens: 128,
+          instructions: "You have a shell tool. To answer, you MUST call the `run_shell` tool — do not answer in text.",
+          input: [
+            { type: "additional_tools", role: "developer", tools: [
+              { type: "function", name: "run_shell", description: "Run a shell command", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
+            ] },
+            { type: "message", role: "user", content: [{ type: "input_text", text: "Run `ls` to list the files here." }] },
+          ],
+        }));
+        // Parse the Responses SSE: a function_call is announced by response.output_item.added.
+        const fc = rsp.t.split("\n\n").map((b) => {
+          const d = b.split("\n").find((l) => l.startsWith("data: "))?.slice(6);
+          try { return d ? JSON.parse(d) : null; } catch { return null; }
+        }).find((e) => e?.type === "response.output_item.added" && e.item?.type === "function_call" && e.item?.name);
+        if (fc) { sawFuncCall = true; fcName = fc.item.name; }
+      }
+      if (sawFuncCall) check("codex additional_tools: tool reached the model → function_call emitted (#4231)", fcName === "run_shell", `name=${fcName}`);
+      else log("  ⊘ codex additional_tools: model answered in text this run (non-deterministic) — extraction is asserted hermetically in unit tests");
     } else log("\n[golden] SKIPPED (no real token)");
   } finally { sup.kill(); }
   log(`\n${failures === 0 ? "ALL PASSED" : failures + " FAILED"} (${passes} passed)`);

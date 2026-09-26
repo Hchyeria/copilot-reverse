@@ -7,8 +7,11 @@ import { ModelScreen } from "./screens/model.js";
 import { ConfigScreen, type ConfigInfo } from "./screens/config.js";
 import { WebIqKeyScreen } from "./screens/webiq-key.js";
 import { NetworkScreen, type NetworkInfo, type NetworkAction } from "./screens/network.js";
+import { ClaudeMapScreen, type ClaudeMapSaveResult } from "./screens/claude-map.js";
 import { SkillScreen } from "./screens/skill.js";
 import { PiScreen } from "./screens/pi.js";
+import { GitHubLoginScreen } from "./screens/github-login.js";
+import type { LoginRequest } from "../cli/auth.js";
 import type { SkillEntry } from "./skills/catalog.js";
 import type { CopilotModelInfo } from "../providers/copilot/models.js";
 import { summarizeStatus, githubLoginState, type StatusSummary, type GithubLoginState } from "./status-summary.js";
@@ -20,6 +23,7 @@ import type { Registry } from "./slash/registry.js";
 import { withCost, fmtTokens as k, fmtCost as usd, type Aggregate } from "./panels/metrics-agg.js";
 import type { WorkerState, StatusResponse, MetricsResponse } from "../shared/control-types.js";
 import type { WebSearchBackend } from "../shared/webiq-key.js";
+import type { ClaudeMapSettings } from "../shared/prefs.js";
 
 type Entry =
   | { type: "user"; text: string }
@@ -29,7 +33,7 @@ type Entry =
   | { type: "metrics"; agg: Aggregate; day: Aggregate; errors: string[] }
   | { type: "help"; commands: CommandHint[] };
 
-type Screen = { kind: "model" } | { kind: "setup"; client: SetupClient } | { kind: "config" } | { kind: "webiq-key" } | { kind: "network" } | { kind: "skill" } | { kind: "pi" } | null;
+type Screen = { kind: "model" } | { kind: "setup"; client: SetupClient } | { kind: "config" } | { kind: "webiq-key" } | { kind: "network" } | { kind: "claude-map" } | { kind: "skill" } | { kind: "pi" } | { kind: "github-login" } | { kind: "github-cli"; request: Extract<LoginRequest, { type: "ghecom" }> } | null;
 
 const stateColor: Record<WorkerState, string> = {
   ready: theme.ready, starting: theme.starting, crashed: theme.crashed, unhealthy: theme.unhealthy,
@@ -56,7 +60,6 @@ function statusCard(s: StatusSummary, extra: string[] = [], clients?: ClientStat
   // Fold in who's logged in + their Copilot plan when connected: "✓ connected · Can Wang (canwa) ·
   // Copilot Enterprise". Each segment is appended only when present, so a failed/pending lookup just
   // shows "✓ connected" with no dangling separator.
-  const ghLine = [gh, s.identity, s.plan].filter(Boolean).join(" · ");
   const web = s.webSearch === "webiq" ? "✓ via WebIQ" : s.webSearch === "copilot" ? "✓ via Copilot (native)" : "✗ unavailable — run /webiq";
   // Per-scope + model when we have the file-derived detail; else fall back to the simple flag.
   const scope = (sc?: { on: boolean; model?: string }) => sc?.on ? `✓ ${sc.model ? sc.model.replace(/\[1m\]$/, "") : "on"}` : "○";
@@ -66,7 +69,10 @@ function statusCard(s: StatusSummary, extra: string[] = [], clients?: ClientStat
     : `claude ${s.clients.claude ? "✓" : "○"}  codex ${s.clients.codex ? "✓" : "○"}  pi ${s.clients.pi ? "✓" : "○"}`;
   const tone: "ok" | "error" = s.github === "connected" ? "ok" : "error";
   return { type: "card", title: "status", tone, lines: [
-    `GitHub login   ${ghLine}`,
+    `GitHub login   ${gh}`,
+    ...(s.identity ? [`account        ${s.identity}`] : []),
+    ...(s.githubHost ? [`host           ${s.githubHost}`] : []),
+    ...(s.plan ? [`plan           ${s.plan}`] : []),
     `web search     ${web}`,
     `worker         ${s.worker}`,
     `clients        ${clientsLine}`,
@@ -89,6 +95,7 @@ export interface AppProps {
   metricsSource?: () => Promise<MetricsResponse>; // server-side lifetime + 24h rollups for /metrics
   readStatus?: () => ClientStatus;            // reads the real config files (per user/project scope)
   modelLimits?: Record<string, number>;       // model id -> context window, shown in the picker
+  modelLabels?: Record<string, string>;       // display-only labels; submitted model ids stay unchanged
   onChat?: (text: string, print: (line: string) => void, model?: string, abort?: AbortController) => Promise<void>;
   loadModels?: () => Promise<string[]>;
   setup?: { apply: (client: SetupClient, scope: Scope, model: string) => Promise<ApplyResult> };
@@ -101,10 +108,13 @@ export interface AppProps {
   info?: ConfigInfo;
   onModelChange?: (model: string) => void;
   pickModelOnStart?: boolean;
-  // Device-code login. `show` pushes the verification URL + code to the UI immediately; the
-  // returned promise resolves with a completion message once the user authorizes. The two-phase
-  // shape is required: a single blocking call would hide the code behind the token poll.
-  login?: (show: (lines: string[]) => void) => Promise<string[]>;
+  claudeMapSettings?: () => ClaudeMapSettings;
+  // Persists one complete draft and restarts the worker. Restart failure is represented separately so
+  // the UI can truthfully report that preferences were saved while activation remains incomplete.
+  saveClaudeMap?: (settings: ClaudeMapSettings) => Promise<ClaudeMapSaveResult>;
+  // The login screen chooses a provider first. GitHub.com then uses the two-phase device flow so its
+  // verification code is visible while polling; GHE.com delegates the interactive login to GitHub CLI.
+  login?: (request: LoginRequest, show: (lines: string[]) => void) => Promise<string[]>;
   // Web search backend control. /webiq opts into Microsoft Web IQ (enableWebiq stores the key + flips
   // mode); disableWebiq (/webiq clean) clears the key. webSearchBackend reports the RESOLVED active
   // backend (copilot | webiq | unavailable), read live so the HUD/status reflect it.
@@ -239,8 +249,8 @@ function ClientBadge({ name, status, userOnly }: { name: string; status: { user:
 
 export function App({
   registry, title, workerState = "starting", initialModel = "—",
-  statusSource, metricsSource, readStatus, modelLimits, onChat,
-  loadModels, setup, installSkill, setupPi, info, onModelChange, pickModelOnStart, login, enableWebiq, disableWebiq, webSearchBackend, networkInfo, setAccessMode, rotateKey, clientModels, startupStatus, githubStatus, accountInfo, changeBanner, onChangeSeen,
+  statusSource, metricsSource, readStatus, modelLimits, modelLabels, onChat,
+  loadModels, setup, installSkill, setupPi, info, onModelChange, pickModelOnStart, claudeMapSettings, saveClaudeMap, login, enableWebiq, disableWebiq, webSearchBackend, networkInfo, setAccessMode, rotateKey, clientModels, startupStatus, githubStatus, accountInfo, changeBanner, onChangeSeen,
 }: AppProps) {
   const cmds: CommandHint[] = registry.list().map((c) => ({ name: c.name, describe: c.describe }));
   const [entries, setEntries] = useState<Entry[]>(() => [
@@ -256,11 +266,12 @@ export function App({
   const [net, setNet] = useState<NetworkInfo | undefined>(() => networkInfo?.());
   // GitHub login state, kept fresh by the supervisor heartbeat surfaced through the 2s status poll.
   const [github, setGithub] = useState<GithubLoginState | undefined>(startupStatus?.github);
+  const [githubHost, setGithubHost] = useState<string | undefined>(startupStatus?.githubHost);
   const [model, setModel] = useState(initialModel);
   const [screen, setScreen] = useState<Screen>(pickModelOnStart && loadModels ? { kind: "model" } : null);
   const [, setNow] = useState(0); // ticks the live loading line while the assistant streams
   const abortRef = useRef<AbortController | null>(null); // current turn's interrupt handle
-  const loginInFlight = useRef(false); // guards against starting a second device-login flow
+  const loginInFlight = useRef(false); // guards against starting a second login flow
   const add = (e: Entry) => setEntries((p) => [...p, e].slice(-100));
   // Re-read the real config files, but keep the previous object when nothing changed so the 2s poll
   // doesn't force a full-frame repaint (see sameStatus). webBackend is a string and already bails on
@@ -271,7 +282,7 @@ export function App({
   };
 
   // esc interrupts an in-flight assistant turn (the Repl doesn't use esc, so this is unambiguous).
-  useInput((_input, key) => { if (key.escape) abortRef.current?.abort(); });
+  useInput((_input, key) => { if (key.escape) abortRef.current?.abort(); }, { isActive: screen?.kind !== "github-cli" });
 
   useEffect(() => {
     if (!statusSource && !readStatus) return;
@@ -281,7 +292,10 @@ export function App({
         const s = await statusSource?.();
         if (alive && s) {
           setState(s.workerState);
-          if (s.github) setGithub(githubLoginState(s.github.hasToken, s.github.ok)); // live login badge
+          if (s.github) {
+            setGithub(githubLoginState(s.github.hasToken, s.github.ok));
+            setGithubHost(s.github.host);
+          }
         }
       } catch { /* daemon momentarily down */ }
       if (alive) refreshStatus(); // HUD reflects the real config files, even if edited externally
@@ -290,6 +304,19 @@ export function App({
     const id = setInterval(tick, 2000);
     return () => { alive = false; clearInterval(id); };
   }, [statusSource]);
+
+  useEffect(() => {
+    if (screen?.kind !== "github-cli" || !login || loginInFlight.current) return;
+    const request = screen.request;
+    loginInFlight.current = true;
+    const timer = setTimeout(() => {
+      void login(request, (lines) => add({ type: "card", title: "/login", tone: "info", lines }))
+        .then((lines) => add({ type: "card", title: "/login", tone: "ok", lines }))
+        .catch((e) => add({ type: "card", title: "/login", tone: "error", lines: [`login failed: ${e instanceof Error ? e.message : String(e)}`] }))
+        .finally(() => { loginInFlight.current = false; setScreen(null); });
+    }, 0);
+    return () => clearTimeout(timer);
+  }, [screen, login]);
 
   const streaming = entries.some((e) => e.type === "assistant" && e.streaming);
   useEffect(() => {
@@ -309,6 +336,11 @@ export function App({
     add({ type: "user", text: `› ${line}` });
     const t = line.trim();
     if (t === "/model" && loadModels) { setScreen({ kind: "model" }); return; }
+    if (t === "/claude-map" && claudeMapSettings && saveClaudeMap && loadModels) { setScreen({ kind: "claude-map" }); return; }
+    if (t.startsWith("/claude-map ")) {
+      add({ type: "card", title: "/claude-map", tone: "error", lines: ["usage: /claude-map"] });
+      return;
+    }
     // Web-search backend controls. "/webiq clean" clears the key; "/webiq" opens the key screen and
     // switches to the WebIQ backend on submit. After either, re-read the resolved backend for the HUD.
     if (t === "/webiq clean" && disableWebiq) {
@@ -321,11 +353,21 @@ export function App({
       // Render the live status overview (same card as startup), then the worker restart history.
       // /status is an explicit "is my login OK right now?" — do the live check when wired (the cached
       // heartbeat can be up to ~60s stale), falling back to the cached/seed value only if it isn't.
-      const ghState = githubStatus ? await githubStatus() : (github ?? startupStatus?.github ?? "signed-out");
+      let ghState: GithubLoginState = github ?? startupStatus?.github ?? "signed-out";
+      let githubError: string | undefined;
+      if (githubStatus) {
+        try { ghState = await githubStatus(); }
+        catch (error) { githubError = error instanceof Error ? error.message : String(error); }
+      }
       let worker = state, restarts: string[] = [];
+      let liveGithubHost = githubHost;
       try {
         const s = await statusSource?.();
-        if (s) { worker = s.workerState; restarts = s.restarts.slice(0, 5).map((r) => `  ${r.reason} exit=${r.exitCode ?? "-"} ${r.stderrTail.slice(0, 60)}`); }
+        if (s) {
+          worker = s.workerState;
+          restarts = s.restarts.slice(0, 5).map((r) => `  ${r.reason} exit=${r.exitCode ?? "-"} ${r.stderrTail.slice(0, 60)}`);
+          liveGithubHost = s.github?.hasToken ? s.github.host : undefined;
+        }
       } catch { /* daemon momentarily down — show what we have */ }
       // Fresh identity/plan for the live card when connected. Best-effort — a failed lookup just omits
       // them. Fall back to the startup values so a transient miss doesn't blank a name we already had.
@@ -336,8 +378,13 @@ export function App({
         clients: { claude: status.claude.user || status.claude.project, codex: status.codex.user || status.codex.project, pi: status.pi.user },
         identity: acct.identity ?? startupStatus?.identity,
         plan: acct.plan ?? startupStatus?.plan,
+        githubHost: liveGithubHost,
       });
-      add(statusCard(summary, restarts.length ? ["", "recent restarts:", ...restarts] : [], status));
+      const extra = [
+        ...(githubError ? [`GitHub check   ${githubError}`] : []),
+        ...(restarts.length ? ["", "recent restarts:", ...restarts] : []),
+      ];
+      add(statusCard(summary, extra, status));
       return;
     }
     if (t === "/config" && info) { setScreen({ kind: "config" }); return; }
@@ -351,16 +398,8 @@ export function App({
       return;
     }
     if (t === "/login" && login) {
-      // Show the verification URL + code right away, then resolve a completion card once the user
-      // authorizes. Done as a special case (not a registry command) because the slash registry only
-      // renders a command's final return value — it can't surface the code mid-poll. Guarded so a
-      // double Enter doesn't start two device-code flows (polling a superseded code 401s).
       if (loginInFlight.current) { add({ type: "card", title: "/login", tone: "info", lines: ["already waiting for authorization…"] }); return; }
-      loginInFlight.current = true;
-      void login((lines) => add({ type: "card", title: "/login", tone: "info", lines }))
-        .then((lines) => add({ type: "card", title: "/login", tone: "ok", lines }))
-        .catch((e) => add({ type: "card", title: "/login", tone: "error", lines: [`login failed: ${e instanceof Error ? e.message : String(e)}`] }))
-        .finally(() => { loginInFlight.current = false; });
+      setScreen({ kind: "github-login" });
       return;
     }
     if (setup && loadModels && (t === "/setup-claude" || t === "/setup-codex")) {
@@ -405,8 +444,45 @@ export function App({
   const configured = (s: { user: boolean; project: boolean }) => s.user || s.project;
 
   let body: React.ReactNode;
-  if (screen?.kind === "model" && loadModels) {
-    body = <ModelScreen loadModels={loadModels} limits={modelLimits} current={model} onPick={pickModel} onCancel={() => setScreen(null)} />;
+  if (screen?.kind === "github-cli") {
+    body = <Text color={theme.muted}>GitHub CLI owns this terminal — complete its prompts below.</Text>;
+  } else if (screen?.kind === "model" && loadModels) {
+    body = <ModelScreen loadModels={loadModels} limits={modelLimits} labels={modelLabels} current={model} onPick={pickModel} onCancel={() => setScreen(null)} />;
+  } else if (screen?.kind === "claude-map" && claudeMapSettings && saveClaudeMap && loadModels) {
+    body = (
+      <ClaudeMapScreen
+        settings={claudeMapSettings()}
+        loadModels={loadModels}
+        onSave={saveClaudeMap}
+        onDone={(saved, result) => {
+          setScreen(null);
+          if (result.activationError) {
+            add({ type: "card", title: "/claude-map", tone: "error", lines: [
+              `preferences saved, but worker activation is incomplete: ${result.activationError}`,
+              "run /restart to apply the saved preferences",
+            ] });
+            return;
+          }
+          const lines = [
+            "✓ Claude map saved",
+            "reopen Claude's /model picker; restart Claude Code/Desktop if its cached list is stale",
+          ];
+          // Reconcile the built-in assistant after every save. Enabling prefers a live mapped identity;
+          // disabling must move off a synthetic alias because it is no longer routable. If no mapping is
+          // live, the first real discovered model is safer than leaving every chat turn on a dead id.
+          const models = result.models ?? [];
+          if (models.length && !models.includes(model)) {
+            const mapped = saved.enabled ? models.find((candidate) => modelLabels?.[candidate]?.includes(" → ")) : undefined;
+            const fallback = mapped ?? models[0];
+            setModel(fallback);
+            onModelChange?.(fallback);
+            lines.push(`chat model switched to ${fallback} (previous model unavailable)`);
+          }
+          add({ type: "card", title: "/claude-map", tone: "ok", lines });
+        }}
+        onCancel={() => { setScreen(null); add({ type: "system", text: "Claude map changes cancelled" }); }}
+      />
+    );
   } else if (screen?.kind === "setup" && setup && loadModels) {
     const client = screen.client;
     body = (
@@ -414,6 +490,7 @@ export function App({
         client={client}
         loadModels={loadModels}
         limits={modelLimits}
+        labels={modelLabels}
         apply={(scope, m) => setup.apply(client, scope, m)}
         onDone={(result, m) => {
           refreshStatus();
@@ -492,6 +569,25 @@ export function App({
       }
     };
     body = <NetworkScreen info={net} onAction={onNet} />;
+  } else if (screen?.kind === "github-login" && login) {
+    body = (
+      <GitHubLoginScreen
+        onSubmit={(request) => {
+          if (loginInFlight.current) return;
+          if (request.type === "ghecom") {
+            setScreen({ kind: "github-cli", request });
+            return;
+          }
+          loginInFlight.current = true;
+          setScreen(null);
+          void login(request, (lines) => add({ type: "card", title: "/login", tone: "info", lines }))
+            .then((lines) => add({ type: "card", title: "/login", tone: "ok", lines }))
+            .catch((e) => add({ type: "card", title: "/login", tone: "error", lines: [`login failed: ${e instanceof Error ? e.message : String(e)}`] }))
+            .finally(() => { loginInFlight.current = false; });
+        }}
+        onCancel={() => { setScreen(null); add({ type: "system", text: "login cancelled" }); }}
+      />
+    );
   } else if (screen?.kind === "skill" && installSkill) {
     body = (
       <SkillScreen

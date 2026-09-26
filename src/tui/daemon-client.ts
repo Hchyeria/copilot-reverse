@@ -2,7 +2,16 @@ import type { StatusResponse, DoctorCheck, MetricSample, MetricsResponse } from 
 
 export class DaemonClient {
   constructor(private base: string, private fetchFn: typeof fetch = fetch) {}
-  private async post(path: string): Promise<void> { await this.fetchFn(`${this.base}${path}`, { method: "POST" }); }
+  private async post(path: string): Promise<void> {
+    const res = await this.fetchFn(`${this.base}${path}`, { method: "POST" });
+    if (res.ok) return;
+    let detail = `control request failed: ${res.status}`;
+    try {
+      const body = await res.json() as { error?: unknown };
+      if (typeof body.error === "string" && body.error) detail = body.error;
+    } catch { /* non-JSON control failure */ }
+    throw new Error(detail);
+  }
   async status(): Promise<StatusResponse> { return (await (await this.fetchFn(`${this.base}/api/status`)).json()) as StatusResponse; }
   async restart(): Promise<void> { return this.post("/api/restart"); }
   async stop(): Promise<void> { return this.post("/api/stop"); }

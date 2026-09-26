@@ -1,5 +1,6 @@
-import { probeGithubAuth, type AuthProbe } from "../providers/copilot/token.js";
+import type { AuthProbe } from "../providers/copilot/token.js";
 import type { GithubStatus } from "../shared/control-types.js";
+import type { GitHubConnection } from "../shared/github-connection.js";
 import { appendCrashLog } from "../shared/crash-log.js";
 
 // How often the supervisor re-checks the GitHub token. Token failure is rare (revoke / re-auth) and
@@ -33,6 +34,7 @@ export function nextGithubStatus(
 // API exposes via /api/status. Dependencies are injected for testing (token reader, probe, clock).
 export class GithubHeartbeat {
   private status: GithubStatus | undefined;
+  private connectionKey: string | undefined;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
   private inFlight = false;
@@ -40,8 +42,8 @@ export class GithubHeartbeat {
   private initialDelayMs: number;
 
   constructor(
-    private readToken: () => string | null,
-    private probe: (ghToken: string) => Promise<AuthProbe> = probeGithubAuth,
+    private readConnection: () => string | GitHubConnection | null,
+    private probe: (connection: string | GitHubConnection) => Promise<AuthProbe>,
     private now: () => number = () => Date.now(),
     opts: { intervalMs?: number; initialDelayMs?: number } = {},
   ) {
@@ -57,10 +59,30 @@ export class GithubHeartbeat {
     if (this.inFlight) return;
     this.inFlight = true;
     try {
-      const token = this.readToken();
-      const probe = token ? await this.probe(token) : null;
-      if (this.stopped) return; // a late result after stop() must not resurrect the timer/state
-      this.status = nextGithubStatus(this.status, Boolean(token), probe, this.now());
+      const connection = this.readConnection();
+      const keyOf = (value: string | GitHubConnection | null): string | undefined => {
+        if (!value) return undefined;
+        if (typeof value === "string") return `legacy:${value}`;
+        return value.type === "github" ? `github:${value.token}` : `ghecom:${value.host}`;
+      };
+      const startedKey = keyOf(connection);
+      if (startedKey !== this.connectionKey) {
+        this.status = undefined;
+        this.connectionKey = startedKey;
+      }
+      const probe = connection ? await this.probe(connection) : null;
+      if (this.stopped) return;
+      const current = this.readConnection();
+      const currentKey = keyOf(current);
+      if (currentKey !== startedKey) {
+        this.status = undefined;
+        this.connectionKey = currentKey;
+        return;
+      }
+      const next = nextGithubStatus(this.status, Boolean(connection), probe, this.now());
+      this.status = next && connection && typeof connection !== "string"
+        ? { ...next, host: connection.type === "github" ? "github.com" : connection.host }
+        : next;
     } catch (e) {
       // Defense in depth: readToken()/probe() are not expected to throw (readGhToken returns null on a
       // bad read, probeGithubAuth never throws), but the timer fires this as `void runOnce()` — an

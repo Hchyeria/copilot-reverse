@@ -1,7 +1,66 @@
 import { describe, it, expect, vi } from "vitest";
 import { fetchModelEndpoints, fetchModelReasoningSupport, fetchModelOneMSupport, fetchCopilotModelCatalog, fetchModelDiscovery } from "../../../src/providers/copilot/models.js";
+import { CopilotEndpointContractError } from "../../../src/providers/copilot/token.js";
+import type { GitHubConnection } from "../../../src/shared/github-connection.js";
 
 const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+
+describe("fetchModelDiscovery", () => {
+  it("returns one coherent live capability snapshot", async () => {
+    const f = vi.fn(async () => json({ data: [{
+      id: "gpt-5.6-sol",
+      supported_endpoints: ["/responses"],
+      capabilities: { supports: { reasoning_effort: ["high"] }, limits: { max_context_window_tokens: 1_100_000 } },
+    }] }));
+    const out = await fetchModelDiscovery("tok", f as unknown as typeof fetch);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(out.live).toBe(true);
+    expect(out.ids).toEqual(["gpt-5.6-sol"]);
+    expect(out.endpoints["gpt-5.6-sol"]).toEqual(["/responses"]);
+    expect(out.reasoning.has("gpt-5.6-sol")).toBe(true);
+    expect(out.reasoningEfforts["gpt-5.6-sol"]).toEqual(["high"]);
+    expect(out.oneM.has("gpt-5.6-sol")).toBe(true);
+    expect(out.limits["gpt-5.6-sol"]).toBe(1_100_000);
+  });
+
+
+  it("uses the session inference origin for model discovery", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({
+        token: "enterprise-token", expiresAtMs: 9_999_999_999_000,
+        inferenceOrigin: "https://copilot.acme.ghe.com",
+      }),
+    };
+    const f = vi.fn(async () => json({ data: [{ id: "enterprise-model" }] }));
+
+    const out = await fetchModelDiscovery(source, f as unknown as typeof fetch);
+
+    expect(out.ids).toEqual(["enterprise-model"]);
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/models");
+  });
+
+
+  it("propagates endpoint contract errors instead of converting them to offline fallback models", async () => {
+    const error = new CopilotEndpointContractError({ type: "ghecom", host: "acme.ghe.com" } satisfies GitHubConnection);
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => { throw error; },
+    };
+    const f = vi.fn();
+
+    await expect(fetchModelDiscovery(source, f as unknown as typeof fetch)).rejects.toBe(error);
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("marks fallback ids as non-live when upstream discovery fails", async () => {
+    const f = vi.fn(async () => new Response("", { status: 500 }));
+    const out = await fetchModelDiscovery("tok", f as unknown as typeof fetch);
+    expect(out.live).toBe(false);
+    expect(out.ids.length).toBeGreaterThan(0);
+    expect(out.limits).toEqual({});
+  });
+});
 
 describe("fetchModelEndpoints", () => {
   it("maps model id -> supported_endpoints", async () => {
@@ -100,6 +159,29 @@ describe("fetchCopilotModelCatalog", () => {
     });
   });
 
+  it("uses the session origin and token for the pi catalog", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({
+        token: "enterprise-token", expiresAtMs: 9_999_999_999_000,
+        inferenceOrigin: "https://copilot.acme.ghe.com",
+      }),
+    };
+    const f = vi.fn(async (_url: unknown, _init?: RequestInit) => json(payload));
+    const out = await fetchCopilotModelCatalog(source, f as unknown as typeof fetch);
+    expect(out.map((m) => m.id)).toContain("claude-opus-4.8");
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/models");
+    expect(f.mock.calls[0][1]?.headers).toMatchObject({ authorization: "Bearer enterprise-token" });
+  });
+
+  it("propagates enterprise endpoint contract errors for the pi catalog", async () => {
+    const error = new CopilotEndpointContractError({ type: "ghecom", host: "acme.ghe.com" } satisfies GitHubConnection);
+    const source = { get: async () => "legacy-token", getSession: async () => { throw error; } };
+    const f = vi.fn();
+    await expect(fetchCopilotModelCatalog(source, f as unknown as typeof fetch)).rejects.toBe(error);
+    expect(f).not.toHaveBeenCalled();
+  });
+
   it("drops non-chat models so an embedding can never reach a picker or a generated config", async () => {
     const f = vi.fn(async () => json(payload));
     const out = await fetchCopilotModelCatalog("tok", f as unknown as typeof fetch);
@@ -140,17 +222,11 @@ describe("fetchModelDiscovery", () => {
     expect([...d.oneM]).toEqual(["claude-opus-4.8"]);
   });
 
-  it("returns null on failure rather than a fallback list", async () => {
-    // This is the whole point: fetchCopilotModels answers a failure with FALLBACK_MODELS, whose ids are
-    // DASHED. Handing those to the router as fuzzy-match targets rewrites a valid claude-opus-4.8 into a
-    // claude-opus-4-8 that Copilot rejects with 400 "model_not_supported". null lets the worker keep an
-    // empty list and pass the requested id through untouched.
-    const f = vi.fn(async () => new Response("", { status: 500 }));
-    expect(await fetchModelDiscovery("tok", f as unknown as typeof fetch)).toBeNull();
-  });
-
-  it("returns null for an empty model list", async () => {
+  it("marks an empty model list as non-live", async () => {
     const f = vi.fn(async () => json({ data: [] }));
-    expect(await fetchModelDiscovery("tok", f as unknown as typeof fetch)).toBeNull();
+    const out = await fetchModelDiscovery("tok", f as unknown as typeof fetch);
+    expect(out.live).toBe(false);
+    expect(out.ids.length).toBeGreaterThan(0);
+    expect(out.limits).toEqual({});
   });
 });

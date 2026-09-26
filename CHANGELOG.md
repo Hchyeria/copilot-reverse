@@ -1,3 +1,50 @@
+## v0.23.2 — 2026-09-16
+
+Show the active GitHub account, login host, and Copilot plan as explicit fields in the startup welcome card and `/status`.
+
+## v0.23.1 — 2026-09-15
+
+Release terminal input before starting interactive GitHub CLI authentication so GHE.com login accepts Enter instead of hanging.
+
+## v0.23.0 — 2026-09-15
+
+Add GitHub Enterprise Cloud with data residency (GHE.com) login through GitHub CLI, while preserving the built-in GitHub.com device flow.
+
+## v0.22.0 — 2026-09-07
+
+Refresh Claude compatibility identities for the current model lineup and add an interactive `/claude-map` editor. Users can map Fable 5.1, Opus 5, Sonnet 5, and Haiku 4.5 to any live GPT backend, restore defaults, and keep unavailable choices safely persisted until their backend returns.
+
+## v0.21.0 — 2026-08-05
+
+feat(models): add an opt-in `/claude-map` compatibility mode for GPT-only Copilot accounts.
+
+When enabled, Anthropic discovery exposes native Claude model identities backed by exact live GPT 5.x targets, and routes requests through the target model's real endpoint, reasoning support, and context window. Missing backends are hidden, original GPT entries remain available, OpenAI/Codex discovery is unchanged, and the feature defaults off.
+
+## v0.20.0 — 2026-07-28
+
+fix(setup): Claude Code now shows a friendly name + true 1M window for models newer than its built-in table (e.g. `claude-opus-5`).
+
+Two parts:
+
+- **Window**: `withClaude1mSuffix` ignored the fetched context window for `claude-` ids and consulted a hardcoded 1M list, so a model shipped after that list got no `[1m]` suffix. The suffix is what Claude Code regex-matches to select a 1,000,000-token window, so `claude-opus-5` silently fell back to 200K. The 1M decision now follows the model's real window (800K–1.5M band), with the hardcoded set used only when the window is unknown. `claude-opus-5` added to the fallback sets.
+- **Display**: a model absent from Claude Code's built-in table renders as a raw id (`claude-opus-5[1m]`) in the picker and status line. Setup now also writes the per-family custom-model trio — `ANTHROPIC_DEFAULT_<FAMILY>_MODEL` / `_NAME` / `_DESCRIPTION` — so it reads as `Opus 5 (1M context)` and the family alias (`/model opus`) resolves to it. `/reset` clears the trio for all families.
+
+Verified against the Claude Code 2.1.216 binary: `contextWindow: 1000000` is reported for `claude-opus-5[1m]`.
+
+- **Picker**: setup wrote `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` right next to `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`, and the former silently defeats the latter — Claude Code's discovery fetch bails when traffic is restricted to "essential", so `~/.claude/cache/gateway-models.json` was never written and `/model` only ever listed Claude Code's built-in models. Setup no longer writes that flag and strips it from existing installs, so the picker now lists every Claude model the gateway advertises (Opus 5, Copilot-only models) under "From gateway".
+
+## v0.19.0 — 2026-07-25
+
+fix(codex): make tools work again on Codex 0.145+ (gpt-5.6 family) — issue #4231.
+
+Two problems, both fixed:
+
+1. **Tools were dropped.** Newer Codex no longer puts tools at the top level of a `/responses` request — it carries them inside an `additional_tools` item in `input`. The Responses translator ignored that item, so the model reached Copilot with zero tools and could only narrate its tool calls as text ("I'm unable to access a shell tool"). We now merge `additional_tools` into the tool list.
+
+2. **Custom tools were mistranslated.** Codex's primary tool `exec` is a `custom` tool (freeform-string input, not JSON). We were flattening it to a JSON-schema function, so the model emitted empty `{}` and Codex rejected the reply ("tool exec invoked with incompatible payload"). Copilot's `/responses` natively accepts `{type:"custom"}` tools and returns a `custom_tool_call` (verified live), so we now round-trip custom tools end-to-end: pass them through as `custom`, translate `custom_tool_call` / `custom_tool_call_output` history both ways (raw-string input), and stream them back as `custom_tool_call` + `custom_tool_call_input.delta/.done` events instead of function_call.
+
+Verified against a live `codex exec -m gpt-5.6-luna`: a real shell tool loop now runs through the proxy (single-step and multi-step create→read-back), with the filesystem as oracle.
+
 ## v0.18.0 — 2026-07-08
 
 feat(status): show the logged-in GitHub user and Copilot plan on the status card. The GitHub line now reads e.g. `✓ connected · Can Wang (canwa_microsoft) · Copilot Enterprise` — the username comes from GitHub `/user`, and the plan (derived from the `sku` on the Copilot token exchange we already perform, so no extra request) is mapped to a friendly label. Both are best-effort: a failed or pending lookup, an expired login, or a signed-out state simply omits them.

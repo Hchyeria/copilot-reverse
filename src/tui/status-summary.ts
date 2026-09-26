@@ -21,6 +21,7 @@ export interface StatusInputs {
   // best-effort — absent when the lookups fail or before they resolve, and the card omits them cleanly.
   identity?: string;
   plan?: string;
+  githubHost?: string;
 }
 
 export interface StatusSummary {
@@ -30,6 +31,7 @@ export interface StatusSummary {
   clients: { claude: boolean; codex: boolean; pi: boolean };
   identity?: string;
   plan?: string;
+  githubHost?: string;
 }
 
 export function githubLoginState(hasToken: boolean, tokenValid: boolean): GithubLoginState {
@@ -43,6 +45,7 @@ export function summarizeStatus(i: StatusInputs): StatusSummary {
     webSearch: i.webSearch,
     worker: i.worker,
     clients: i.clients,
+    ...(i.githubHost ? { githubHost: i.githubHost } : {}),
     // Identity/plan only make sense when actually connected — an expired/signed-out token shouldn't
     // show a stale name. Guard here so callers can pass them unconditionally.
     ...(i.hasToken && i.tokenValid && i.identity ? { identity: i.identity } : {}),

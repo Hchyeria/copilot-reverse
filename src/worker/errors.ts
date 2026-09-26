@@ -1,6 +1,7 @@
 // Turn a raw upstream error message into an actionable hint (agent-maestro v2.8.1/v2.6.0:
 // structured context-window-exceeded + model_not_supported guidance instead of a bare 400).
-import { CopilotAuthError } from "../providers/copilot/token.js";
+import { GitHubReauthenticationRequiredError } from "../cli/auth.js";
+import { CopilotAuthError, CopilotEndpointContractError, CopilotEntitlementError } from "../providers/copilot/token.js";
 import { isTerminalUpstream } from "../providers/copilot/adapter.js";
 
 export function errorHint(message: string): string {
@@ -33,7 +34,8 @@ export function errorHint(message: string): string {
 //     instead of retrying a 502-class `api_error` to their turn timeout (issue #50 P1 freeze).
 export interface ErrorClass { status: number; terminal: boolean }
 export function classifyError(err: unknown): ErrorClass {
-  if (err instanceof CopilotAuthError) return { status: 401, terminal: true };
+  if (err instanceof CopilotAuthError || err instanceof GitHubReauthenticationRequiredError) return { status: 401, terminal: true };
+  if (err instanceof CopilotEndpointContractError || err instanceof CopilotEntitlementError) return { status: 422, terminal: true };
   // A permanent upstream 4xx (model_not_supported, invalid_request_body, …) — surface it verbatim so
   // the caller sees the real status and stops retrying. 429/408 and 5xx fall through to a retriable 502.
   if (isTerminalUpstream(err)) return { status: err.status, terminal: true };

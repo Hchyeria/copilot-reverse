@@ -8,10 +8,17 @@ describe("DaemonClient", () => {
     const c = new DaemonClient("http://x", f as unknown as typeof fetch);
     expect((await c.status()).workerState).toBe("ready");
   });
-  it("posts restart", async () => {
+  it("posts restart and rejects a failed replacement", async () => {
     const f = vi.fn(async () => json({ ok: true }));
     await new DaemonClient("http://x", f as unknown as typeof fetch).restart();
     expect((f.mock.calls[0][1] as RequestInit).method).toBe("POST");
+
+    const failed = vi.fn(async () => new Response(JSON.stringify({ ok: false, error: "worker exited before ready" }), { status: 503, headers: { "content-type": "application/json" } }));
+    await expect(new DaemonClient("http://x", failed as unknown as typeof fetch).restart()).rejects.toThrow("worker exited before ready");
+  });
+  it("rejects non-OK control responses even when the body is not JSON", async () => {
+    const f = vi.fn(async () => new Response("unavailable", { status: 502 }));
+    await expect(new DaemonClient("http://x", f as unknown as typeof fetch).restart()).rejects.toThrow(/502/);
   });
   it("runs doctor", async () => {
     const f = vi.fn(async () => json({ checks: [{ name: "x", ok: true, detail: "d" }] }));

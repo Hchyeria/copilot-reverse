@@ -10,7 +10,7 @@ export interface DashModel { id: string; display_name?: string }
 export interface ControlDeps {
   db: Db;
   getState: () => WorkerState;
-  restart: () => void;
+  restart: () => void | Promise<void>;
   stop: () => void;
   start: () => void;
   doctor: (ping?: boolean) => Promise<DoctorCheck[]>;
@@ -26,7 +26,10 @@ export function createControlApp(deps: ControlDeps): Express {
   app.use(express.json());
   app.get("/", (_req, res) => res.type("html").send(dashboardHtml()));
   app.get("/api/status", (_req, res) => res.json({ workerState: deps.getState(), restarts: listRestarts(deps.db, 50), github: deps.github() }));
-  app.post("/api/restart", (_req, res) => { deps.restart(); res.json({ ok: true }); });
+  app.post("/api/restart", async (_req, res) => {
+    try { await deps.restart(); res.json({ ok: true }); }
+    catch (e) { res.status(503).json({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
+  });
   app.post("/api/stop", (_req, res) => { deps.stop(); res.json({ ok: true }); });
   app.post("/api/start", (_req, res) => { deps.start(); res.json({ ok: true }); });
   // ?ping=1 opts into the slower per-model connectivity probe (real 1-token requests); the dashboard's

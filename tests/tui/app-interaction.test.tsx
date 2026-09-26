@@ -134,13 +134,41 @@ describe("TUI: /metrics styled card", () => {
 });
 
 describe("TUI: /login surfaces the device code before the poll resolves", () => {
+  it("unmounts Ink input handlers before starting interactive GHE.com login", async () => {
+    let frameWhenLoginStarted = "";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let getFrame = (): string | undefined => undefined;
+    let readableListenersWhenLoginStarted = -1;
+    let inputStream: NodeJS.ReadableStream | undefined;
+    const login = vi.fn(async () => {
+      frameWhenLoginStarted = getFrame() ?? "";
+      readableListenersWhenLoginStarted = inputStream?.listenerCount("readable") ?? -1;
+      await gate;
+      return ["GitHub authorization complete."];
+    });
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" login={login} />);
+    inputStream = stdin;
+    getFrame = lastFrame;
+    await tick();
+    stdin.write("/login"); await tick(); stdin.write("\r"); await tick(60);
+    stdin.write("\x1b[B"); await tick(); stdin.write("\r"); await tick(60);
+    stdin.write("acme.ghe.com"); await tick(); stdin.write("\r"); await tick(60);
+
+    expect(login).toHaveBeenCalledWith({ type: "ghecom", host: "acme.ghe.com" }, expect.any(Function));
+    expect(frameWhenLoginStarted).toContain("GitHub CLI owns this terminal");
+    expect(readableListenersWhenLoginStarted).toBe(0);
+    expect(lastFrame()).toContain("GitHub CLI owns this terminal");
+    release();
+  });
+
   it("renders the verification URL + code immediately, not buffered behind the token poll", async () => {
     // Reproduces the deadlock: the old /login buffered its device-code line and only returned
     // (and thus rendered) after pollForToken resolved — but the user can't authorize a code they
     // can't see. The login prop must push the code to the UI, then resolve when authorized.
     let releaseToken!: () => void;
     const tokenGate = new Promise<void>((r) => { releaseToken = r; });
-    const login = (show: (lines: string[]) => void) => {
+    const login = (_request: { type: "github" } | { type: "ghecom"; host: string }, show: (lines: string[]) => void) => {
       show(["Open https://github.com/login/device and enter code: AB-12"]);
       return tokenGate.then(() => ["GitHub authorization complete."]);
     };
@@ -148,6 +176,9 @@ describe("TUI: /login surfaces the device code before the poll resolves", () => 
     await tick();
     stdin.write("/login");
     await tick();
+    stdin.write("\r");
+    await tick(80);
+    expect(lastFrame()).toContain("GitHub.com");
     stdin.write("\r");
     await tick(80);
     // The code is on screen WHILE the token poll is still pending (gate not released).
@@ -162,7 +193,7 @@ describe("TUI: /login surfaces the device code before the poll resolves", () => 
   it("renders an error card (not a crash) when authorization fails", async () => {
     // A rejected poll (e.g. expired/incorrect device code) must surface as an error card. The old
     // path let the rejection escape as an unhandled rejection and killed the whole process.
-    const login = (show: (lines: string[]) => void) => {
+    const login = (_request: { type: "github" } | { type: "ghecom"; host: string }, show: (lines: string[]) => void) => {
       show(["Open https://github.com/login/device and enter code: AB-12"]);
       return Promise.reject(new Error("authorization failed: incorrect_device_code"));
     };
@@ -170,6 +201,8 @@ describe("TUI: /login surfaces the device code before the poll resolves", () => 
     await tick();
     stdin.write("/login");
     await tick();
+    stdin.write("\r");
+    await tick(80);
     stdin.write("\r");
     await tick(80);
     const f = lastFrame() ?? "";
@@ -184,10 +217,10 @@ describe("TUI: /login surfaces the device code before the poll resolves", () => 
     // and polling a superseded code fails with incorrect_device_code. Only one flow should start.
     let starts = 0;
     const gate = new Promise<string[]>(() => {}); // never resolves — login stays pending
-    const login = (show: (lines: string[]) => void) => { starts++; show([`code ${starts}`]); return gate; };
+    const login = (_request: { type: "github" } | { type: "ghecom"; host: string }, show: (lines: string[]) => void) => { starts++; show([`code ${starts}`]); return gate; };
     const { stdin } = render(<App registry={reg()} title="m" login={login} />);
     await tick();
-    stdin.write("/login"); await tick(); stdin.write("\r"); await tick(60);
+    stdin.write("/login"); await tick(); stdin.write("\r"); await tick(60); stdin.write("\r"); await tick(60);
     stdin.write("/login"); await tick(); stdin.write("\r"); await tick(60);
     expect(starts).toBe(1);
   });
@@ -310,20 +343,24 @@ describe("TUI: startup status card", () => {
     expect(f).toMatch(/web search.*via WebIQ/);
     expect(f).toMatch(/worker.*ready/);
   });
-  it("folds the username + Copilot plan into the GitHub line when present", () => {
+  it("shows the login account and GHE.com domain as explicit welcome fields", () => {
     const startupStatus = { github: "connected" as const, webSearch: "webiq" as const, worker: "ready" as const,
-      clients: { claude: true, codex: false }, identity: "Can Wang (canwa_microsoft)", plan: "Copilot Enterprise" };
+      clients: { claude: true, codex: false }, identity: "Can Wang (canwa_microsoft)", plan: "Copilot Enterprise", githubHost: "msft.ghe.com" };
     const { lastFrame } = render(<App registry={reg()} title="m" startupStatus={startupStatus} />);
     const f = lastFrame() ?? "";
-    expect(f).toMatch(/GitHub login.*connected.*canwa_microsoft.*Copilot Enterprise/);
+    expect(f).toMatch(/GitHub login.*connected/);
+    expect(f).toMatch(/account.*Can Wang \(canwa_microsoft\)/);
+    expect(f).toMatch(/host.*msft\.ghe\.com/);
+    expect(f).toMatch(/plan.*Copilot Enterprise/);
   });
 });
 
 describe("TUI: /status folds in identity + plan from accountInfo", () => {
-  it("shows the fresh username + plan on the live status card", async () => {
+  it("shows the fresh account and GHE.com domain as explicit fields", async () => {
     const accountInfo = vi.fn(async () => ({ identity: "Can Wang (canwa_microsoft)", plan: "Copilot Enterprise" }));
+    const statusSource = async () => ({ workerState: "ready" as const, restarts: [], github: { ok: true, hasToken: true, checkedAt: 1, detail: "token valid", host: "msft.ghe.com" } });
     const { stdin, lastFrame } = render(
-      <App registry={reg()} title="m" githubStatus={async () => "connected"} webSearchBackend={() => "copilot"} accountInfo={accountInfo} />,
+      <App registry={reg()} title="m" statusSource={statusSource} githubStatus={async () => "connected"} webSearchBackend={() => "copilot"} accountInfo={accountInfo} />,
     );
     await tick();
     stdin.write("/status");
@@ -331,7 +368,11 @@ describe("TUI: /status folds in identity + plan from accountInfo", () => {
     stdin.write("\r");
     await tick(80);
     expect(accountInfo).toHaveBeenCalled();
-    expect(lastFrame() ?? "").toMatch(/GitHub login.*connected.*canwa_microsoft.*Copilot Enterprise/);
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(/GitHub login.*connected/);
+    expect(frame).toMatch(/account.*Can Wang \(canwa_microsoft\)/);
+    expect(frame).toMatch(/host.*msft\.ghe\.com/);
+    expect(frame).toMatch(/plan.*Copilot Enterprise/);
   });
 });
 
@@ -362,6 +403,118 @@ describe("TUI: model picker", () => {
     const f = lastFrame() ?? "";
     expect(f).toContain("select chat model");
     expect(f).toMatch(/1M|128K/);
+  });
+
+  it("shows mapping arrows but submits the native Claude id", async () => {
+    const selected: string[] = [];
+    const loadModels = async () => ["gpt-5.6-sol", "claude-opus-5"];
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels}
+      modelLimits={{ "gpt-5.6-sol": 1_100_000, "claude-opus-5": 1_100_000 }}
+      modelLabels={{ "claude-opus-5": "claude-opus-5 → gpt-5.6-sol" }} onModelChange={(m) => selected.push(m)} />);
+    await tick(); stdin.write("/model"); await tick(); stdin.write("\r"); await tick(80);
+    expect(lastFrame() ?? "").toContain("claude-opus-5 → gpt-5.6-sol");
+    stdin.write("\x1b[B"); await tick(); stdin.write("\r"); await tick(80);
+    expect(selected).toEqual(["claude-opus-5"]);
+  });
+});
+
+describe("TUI: /setup-claude mapped model picker", () => {
+  it("shows Claude-to-GPT mapping labels and applies the native Claude id", async () => {
+    const applied: string[] = [];
+    const setup = { apply: vi.fn(async (_client: string, _scope: string, model: string) => {
+      applied.push(model);
+      return { path: "/tmp/settings.json", changed: ["ANTHROPIC_MODEL"] };
+    }) };
+    const loadModels = async () => ["gpt-5.6-sol", "claude-opus-5"];
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels} setup={setup as any}
+      modelLimits={{ "gpt-5.6-sol": 1_100_000, "claude-opus-5": 1_100_000 }}
+      modelLabels={{ "claude-opus-5": "claude-opus-5 → gpt-5.6-sol" }} />);
+    await tick(); stdin.write("/setup-claude"); await tick(); stdin.write("\r"); await tick(80);
+    const picker = lastFrame() ?? "";
+    expect(picker).toContain("claude-opus-5 → gpt-5.6-sol");
+    expect(picker.indexOf("claude-opus-5 → gpt-5.6-sol")).toBeLessThan(picker.indexOf("gpt-5.6-sol"));
+    stdin.write("\r"); await tick(); // first item is the mapped alias -> scope
+    stdin.write("\r"); await tick(80); // global -> apply
+    expect(applied).toEqual(["claude-opus-5"]);
+  });
+});
+
+describe("TUI: /claude-map interactive editor", () => {
+  const settings = () => ({ enabled: false, overrides: {} });
+  const loadModels = async () => ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-sol-fast", "gpt-5.6-luna"];
+  const open = async (stdin: { write: (value: string) => void }) => {
+    await tick(); stdin.write("/claude-map"); await tick(); stdin.write("\r"); await tick(80);
+  };
+  const save = async (stdin: { write: (value: string) => void }) => {
+    for (let i = 0; i < 6; i++) { stdin.write("\x1b[B"); await tick(); }
+    stdin.write("\r"); await tick(100);
+  };
+
+  it("opens the editor with all current Claude identities and does not write before Save", async () => {
+    const saveClaudeMap = vi.fn(async () => ({ models: [] }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels} claudeMapSettings={settings} saveClaudeMap={saveClaudeMap} />);
+    await open(stdin);
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(/Claude model map.*off/i);
+    expect(frame).toContain("claude-fable-5-1 → gpt-6-astra");
+    expect(frame).toContain("claude-sonnet-5 → gpt-5.6-sol-fast");
+    expect(saveClaudeMap).not.toHaveBeenCalled();
+  });
+
+  it("saves one complete snapshot and prints the client refresh hint", async () => {
+    const saveClaudeMap = vi.fn(async () => ({ models: await loadModels() }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels} claudeMapSettings={settings} saveClaudeMap={saveClaudeMap} />);
+    await open(stdin); await save(stdin);
+    expect(saveClaudeMap).toHaveBeenCalledTimes(1);
+    expect(saveClaudeMap).toHaveBeenCalledWith({ enabled: false, overrides: {} });
+    expect(lastFrame() ?? "").toMatch(/saved.*reopen.*\/model|restart Claude/i);
+  });
+
+  it("heals an unavailable persisted chat model to the first live mapped identity after an enabled save", async () => {
+    const changed: string[] = [];
+    const enabledSettings = () => ({ enabled: true, overrides: {} });
+    const mappedModels = async () => ["gpt-5.6-sol", "claude-opus-5"];
+    const saveClaudeMap = vi.fn(async () => ({ models: await mappedModels() }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" initialModel="claude-opus-4-8"
+      loadModels={mappedModels} modelLabels={{ "claude-opus-5": "claude-opus-5 → gpt-5.6-sol" }}
+      claudeMapSettings={enabledSettings} saveClaudeMap={saveClaudeMap} onModelChange={(model) => changed.push(model)} />);
+    await open(stdin); await save(stdin);
+    expect(changed).toEqual(["claude-opus-5"]);
+    expect(lastFrame() ?? "").toMatch(/chat model.*claude-opus-5/i);
+  });
+
+  it("moves a synthesized chat alias back to a real model when the map is disabled", async () => {
+    const changed: string[] = [];
+    const enabledSettings = () => ({ enabled: true, overrides: {} });
+    const saveClaudeMap = vi.fn(async () => ({ models: ["gpt-5.6-sol", "gpt-4o"] }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" initialModel="claude-opus-5"
+      loadModels={loadModels} claudeMapSettings={enabledSettings} saveClaudeMap={saveClaudeMap}
+      onModelChange={(model) => changed.push(model)} />);
+    await open(stdin);
+    stdin.write("\r"); await tick(40); // disable the map in the draft
+    await save(stdin);
+    expect(saveClaudeMap).toHaveBeenCalledWith({ enabled: false, overrides: {} });
+    expect(changed).toEqual(["gpt-5.6-sol"]);
+    expect(lastFrame() ?? "").toMatch(/chat model.*gpt-5\.6-sol/i);
+  });
+
+  it("rejects obsolete command arguments without opening, persisting, or restarting", async () => {
+    const saveClaudeMap = vi.fn(async () => ({ models: [] }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels} claudeMapSettings={settings} saveClaudeMap={saveClaudeMap} />);
+    await tick(); stdin.write("/claude-map on"); await tick(); stdin.write("\r"); await tick(80);
+    expect(saveClaudeMap).not.toHaveBeenCalled();
+    expect(lastFrame() ?? "").toContain("usage: /claude-map");
+    expect(lastFrame() ?? "").not.toContain("save changes");
+  });
+
+  it("reports saved preferences but incomplete activation when the worker restart fails", async () => {
+    const saveClaudeMap = vi.fn(async () => ({ activationError: "restart failed" }));
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels} claudeMapSettings={settings} saveClaudeMap={saveClaudeMap} />);
+    await open(stdin); await save(stdin);
+    const frame = lastFrame() ?? "";
+    expect(frame).toMatch(/preference.*saved/i);
+    expect(frame).toMatch(/restart failed|\/restart/i);
+    expect(frame).not.toMatch(/✓.*saved/i);
   });
 });
 
