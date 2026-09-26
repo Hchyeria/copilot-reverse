@@ -14,7 +14,7 @@ const GPT4O: CopilotModelInfo = {
 };
 
 const settle = () => new Promise((r) => setTimeout(r, 30));
-const result = { path: "/home/u/.pi/agent/models.json", changed: ["copilot-reverse-anthropic", "copilot-reverse-openai"] };
+const result = { path: "/home/u/.pi/agent/models.json", changed: ["copilot-anthropic", "copilot-openai"] };
 
 describe("piModelLabel", () => {
   it("shows the name, id, window, and the badges that decide what pi can do with it", () => {
@@ -38,9 +38,9 @@ describe("PiScreen", () => {
     expect(apply).toHaveBeenCalledWith([OPUS]);
     expect(lastFrame()).toMatch(/added 1 model/);
     expect(lastFrame()).toContain(result.path);
-    // The done card tells you how to actually run it, over either surface.
-    expect(lastFrame()).toMatch(/--provider copilot-reverse-anthropic --model claude-opus-4\.8/);
-    expect(lastFrame()).toMatch(/--provider copilot-reverse-openai --model claude-opus-4\.8/);
+    // The done card tells you how to run it, on the surface that matches its family (opus → Anthropic).
+    expect(lastFrame()).toMatch(/--provider copilot-anthropic --model claude-opus-4\.8/);
+    expect(lastFrame()).not.toMatch(/--provider copilot-openai --model claude-opus-4\.8/);
     stdin.write("x"); // dismiss
     await settle();
     expect(onDone).toHaveBeenCalledWith(result, [OPUS]);

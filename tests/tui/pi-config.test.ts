@@ -35,18 +35,21 @@ describe("buildPiConfig", () => {
     expect(p[PI_OPENAI_PROVIDER].baseUrl).toBe("http://127.0.0.1:7891/openai");
   });
 
-  it("carries every picked model on both providers, keeping Copilot's raw dotted id", () => {
+  it("splits picked models by family: Claude on the Anthropic surface, the rest on OpenAI", () => {
     const p = buildPiConfig([OPUS, GPT4O], endpoint);
-    // router.resolveModel runs on both worker routes, so a dotted id resolves as-is on either one.
-    expect(p[PI_ANTHROPIC_PROVIDER].models.map((m) => m.id)).toEqual(["claude-opus-4.8", "gpt-4o"]);
-    expect(p[PI_OPENAI_PROVIDER].models.map((m) => m.id)).toEqual(["claude-opus-4.8", "gpt-4o"]);
+    // router.resolveModel runs on both worker routes, but a Claude model must not appear on the OpenAI
+    // surface (nor a gpt model on the Anthropic one) — the upstream family would reject it.
+    expect(p[PI_ANTHROPIC_PROVIDER].models.map((m) => m.id)).toEqual(["claude-opus-4.8"]);
+    expect(p[PI_OPENAI_PROVIDER].models.map((m) => m.id)).toEqual(["gpt-4o"]);
     // Each model states the api/baseUrl of the provider it sits under.
     expect(p[PI_OPENAI_PROVIDER].models[0].api).toBe("openai-completions");
     expect(p[PI_OPENAI_PROVIDER].models[0].baseUrl).toBe("http://127.0.0.1:7891/openai");
+    expect(p[PI_ANTHROPIC_PROVIDER].models[0].api).toBe("anthropic-messages");
   });
 
   it("maps vision to image input and cost to the /metrics list price", () => {
-    const [opus, gpt] = buildPiConfig([OPUS, GPT4O], endpoint)[PI_OPENAI_PROVIDER].models;
+    const [opus] = buildPiConfig([OPUS, GPT4O], endpoint)[PI_ANTHROPIC_PROVIDER].models;
+    const [gpt] = buildPiConfig([OPUS, GPT4O], endpoint)[PI_OPENAI_PROVIDER].models;
     expect(opus.input).toEqual(["text", "image"]);
     expect(gpt.input).toEqual(["text"]);
     expect(opus.contextWindow).toBe(200_000);
@@ -59,7 +62,7 @@ describe("buildPiConfig", () => {
   });
 
   it("clamps every pi thinking level onto an effort the model actually accepts", () => {
-    const [opus] = buildPiConfig([OPUS], endpoint)[PI_OPENAI_PROVIDER].models;
+    const [opus] = buildPiConfig([OPUS], endpoint)[PI_ANTHROPIC_PROVIDER].models;
     expect(opus.reasoning).toBe(true);
     // The model accepts only low/medium/high. A missing key would make pi forward its own level
     // verbatim — "xhigh"/"max" would be a hard upstream 400 — so every level is stated and clamped.
@@ -103,7 +106,9 @@ describe("applyPi / resetPi (non-destructive merge into ~/.pi/agent/models.json)
     expect(cfg.providers["github-copilot"].models).toEqual([{ id: "gpt-5.6-luna" }]);
     expect(cfg.providers.ollama.baseUrl).toBe("http://localhost:11434/v1");
     expect(cfg.somethingElse).toEqual({ keep: true });
-    expect(cfg.providers[PI_OPENAI_PROVIDER].models).toHaveLength(1);
+    // OPUS is a Claude model, so it lands on the Anthropic surface; the OpenAI provider stays empty.
+    expect(cfg.providers[PI_ANTHROPIC_PROVIDER].models).toHaveLength(1);
+    expect(cfg.providers[PI_OPENAI_PROVIDER].models).toHaveLength(0);
   });
 
   it("replaces our providers wholesale on re-run, so a de-selected model doesn't linger", () => {

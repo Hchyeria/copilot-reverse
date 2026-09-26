@@ -1,5 +1,7 @@
 node_modules
 dist
+bun.lock
+copilot-reverse
 *.log
 coverage
 .vitest
@@ -19,3 +21,6 @@ e2e/docker/out/
 report.md
 /secrets/
 /out/
+
+# papers
+docs/

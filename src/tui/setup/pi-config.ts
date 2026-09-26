@@ -10,12 +10,14 @@ import type { Endpoint } from "./clients.js";
 // Claude Code and Codex, pi has NO project-scoped config — getModelsPath() is always <agent dir>/
 // models.json, so there is no `Scope` here and callers never ask for one.
 //
-// We write TWO providers over the same picked models, because the worker speaks both dialects and each
-// exercises a different translation path: anthropic-messages (native cache_control, the path Claude
-// Code drives) and openai-completions (the path Codex drives). Having both means any model can be run
-// over either surface — useful when one translation misbehaves and you want to A/B it.
-export const PI_ANTHROPIC_PROVIDER = "copilot-reverse-anthropic";
-export const PI_OPENAI_PROVIDER = "copilot-reverse-openai";
+// We write TWO providers, one per translation path the worker speaks: anthropic-messages (native
+// cache_control, the path Claude Code drives) and openai-completions (the path Codex drives). Each
+// provider carries ONLY the models that belong to its dialect — Claude models on the Anthropic
+// surface, everything else on the OpenAI surface. Cross-listing (a gpt model under the Anthropic
+// provider, or a claude model under the OpenAI one) advertises a model the upstream family rejects,
+// so we split the picked list by family instead of duplicating it.
+export const PI_ANTHROPIC_PROVIDER = "copilot-anthropic";
+export const PI_OPENAI_PROVIDER = "copilot-openai";
 export const PI_PROVIDER_IDS = [PI_ANTHROPIC_PROVIDER, PI_OPENAI_PROVIDER];
 
 // pi's thinking levels (ModelThinkingLevel), weakest → strongest. "off" is handled separately: it maps
@@ -80,29 +82,39 @@ function piModel(m: CopilotModelInfo, api: string, baseUrl: string): PiModel {
   };
 }
 
-// The two provider blocks, both carrying the same models. The base URLs are NOT interchangeable and
+// True for Copilot's Claude family (ids are the raw dotted upstream form, e.g. "claude-opus-4.8",
+// "claude-sonnet-5"). These belong ONLY on the Anthropic surface; everything else (gpt-*, o-series,
+// gemini-*, …) belongs ONLY on the OpenAI surface.
+export function isClaudeModel(id: string): boolean {
+  return /^claude[-.]/i.test(id);
+}
+
+// The two provider blocks, split by model family. The base URLs are NOT interchangeable and
 // aren't guesses: pi's built-in anthropic provider is "https://api.anthropic.com" (its SDK appends
 // /v1/messages) while the openai one is "https://api.openai.com/v1" (appends /chat/completions) — so
 // these land exactly on the worker's /anthropic/v1/messages and /openai/chat/completions mounts.
 // Model ids stay in Copilot's raw dotted form (claude-opus-4.8): router.resolveModel runs on both
-// worker routes, so a dotted id resolves as-is on either one — no canonicalization needed.
+// worker routes, so a dotted id resolves as-is on either one — no canonicalization needed. The
+// Anthropic provider lists only Claude models; the OpenAI provider lists only the rest.
 export function buildPiConfig(models: CopilotModelInfo[], e: Endpoint): PiProviders {
   const anthropicBase = `http://${e.host}:${e.port}/anthropic`;
   const openaiBase = `http://${e.host}:${e.port}/openai`;
+  const claude = models.filter((m) => isClaudeModel(m.id));
+  const nonClaude = models.filter((m) => !isClaudeModel(m.id));
   return {
     [PI_ANTHROPIC_PROVIDER]: {
       name: "Copilot via copilot-reverse (Anthropic)",
       baseUrl: anthropicBase,
       api: "anthropic-messages",
       apiKey: e.apiKey,
-      models: models.map((m) => piModel(m, "anthropic-messages", anthropicBase)),
+      models: claude.map((m) => piModel(m, "anthropic-messages", anthropicBase)),
     },
     [PI_OPENAI_PROVIDER]: {
       name: "Copilot via copilot-reverse (OpenAI)",
       baseUrl: openaiBase,
       api: "openai-completions",
       apiKey: e.apiKey,
-      models: models.map((m) => piModel(m, "openai-completions", openaiBase)),
+      models: nonClaude.map((m) => piModel(m, "openai-completions", openaiBase)),
     },
   };
 }
@@ -150,7 +162,8 @@ export function resetPi(o: PlaceOpts = {}): ApplyResult {
 
 // Is OUR config present, and how many models does it advertise? Feeds the client status surfaces (HUD,
 // /config, dashboard). Mirrors the "is this ours?" test the other clients use — a loopback base URL —
-// so a user's own hand-written provider is never mistaken for ours.
+// so a user's own hand-written provider is never mistaken for ours. The two providers hold disjoint
+// families (Claude vs the rest), so the model count is their SUM, not the max of either.
 export function readPiStatus(o: PlaceOpts = {}): { on: boolean; models: number } {
   const cfg = readConfig(piPath(o));
   const providers = (cfg.providers && typeof cfg.providers === "object" ? cfg.providers : {}) as Record<string, { baseUrl?: unknown; models?: unknown }>;
@@ -160,7 +173,7 @@ export function readPiStatus(o: PlaceOpts = {}): { on: boolean; models: number }
     const p = providers[id];
     if (!p || typeof p.baseUrl !== "string" || !/127\.0\.0\.1|localhost/.test(p.baseUrl)) continue;
     on = true;
-    models = Math.max(models, Array.isArray(p.models) ? p.models.length : 0);
+    models += Array.isArray(p.models) ? p.models.length : 0;
   }
   return { on, models };
 }

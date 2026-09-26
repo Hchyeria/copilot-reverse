@@ -3,6 +3,10 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **Pi provider split / personal-use cleanup (pre-push verification)** — `npm test` passed
+  **949/949 tests across 89 files**, including Vitest E2E; `npm run build` passed.
+  Docker HTTP and live Copilot CLI E2E were not run for this commit/push.
+
 - **2026-09-26 (setup-pi merge with v0.23.2)** — resolved setup/model-discovery/TUI/worker
   conflicts while retaining pi setup, GHE session routing, Claude model mapping, and stream deadline
   diagnostics. Added pi-catalog coverage for the enterprise inference origin/token and fail-closed

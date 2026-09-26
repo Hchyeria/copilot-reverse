@@ -4,7 +4,7 @@ import { MultiSelect } from "../components/multi-select.js";
 import { theme } from "../theme.js";
 import { formatContextWindow } from "../../shared/format.js";
 import type { ApplyResult } from "../setup/apply.js";
-import { PI_ANTHROPIC_PROVIDER, PI_OPENAI_PROVIDER } from "../setup/pi-config.js";
+import { PI_ANTHROPIC_PROVIDER, PI_OPENAI_PROVIDER, isClaudeModel } from "../setup/pi-config.js";
 import type { CopilotModelInfo } from "../../providers/copilot/models.js";
 
 type Step = "loading" | "pick" | "applying" | "done" | "error";
@@ -80,18 +80,25 @@ export function PiScreen({ loadCatalog, apply, onDone, onCancel, current }: PiSc
 
       {step === "applying" && <Text color={theme.muted}>writing pi config…</Text>}
 
-      {step === "done" && result && (
+      {step === "done" && result && (() => {
+        // Each surface lists only its own family, so the run hint must too: a Claude example for the
+        // Anthropic provider, a non-Claude example for the OpenAI provider. Show only the lines that
+        // actually have a model behind them.
+        const claudeEg = chosen.find((m) => isClaudeModel(m.id));
+        const openaiEg = chosen.find((m) => !isClaudeModel(m.id));
+        return (
         <Box flexDirection="column">
           <Text color={theme.ready}>✓ added {chosen.length} model{chosen.length === 1 ? "" : "s"} to pi</Text>
           <Text color={theme.output}>wrote {result.path}</Text>
           <Text color={theme.muted}>providers: {result.changed.join(", ")}</Text>
           <Text> </Text>
-          <Text color={theme.muted}>run a model over either surface:</Text>
-          <Text color={theme.output}>  pi --provider {PI_ANTHROPIC_PROVIDER} --model {chosen[0]?.id ?? "<model>"}</Text>
-          <Text color={theme.output}>  pi --provider {PI_OPENAI_PROVIDER} --model {chosen[0]?.id ?? "<model>"}</Text>
+          <Text color={theme.muted}>run a model:</Text>
+          {claudeEg && <Text color={theme.output}>  pi --provider {PI_ANTHROPIC_PROVIDER} --model {claudeEg.id}</Text>}
+          {openaiEg && <Text color={theme.output}>  pi --provider {PI_OPENAI_PROVIDER} --model {openaiEg.id}</Text>}
           <Dismiss onDismiss={() => onDone(result, chosen)} />
         </Box>
-      )}
+        );
+      })()}
 
       {step === "error" && (
         <Box flexDirection="column">
