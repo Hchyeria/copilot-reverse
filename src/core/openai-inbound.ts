@@ -76,13 +76,21 @@ export function canonicalToOpenAIResponse(r: CanonicalResponse) {
 
 export function canonicalChunkToOpenAISSE(chunk: CanonicalChunk, id: string, model: string): string {
   if (chunk.done) {
-    // Emit a final usage chunk (OpenAI stream_options.include_usage shape) before [DONE].
+    // A real OpenAI stream terminates with a CHOICE chunk carrying finish_reason, and only then the
+    // optional usage-only chunk (stream_options.include_usage shape) and [DONE]. We used to skip
+    // straight to usage/[DONE], never emitting finish_reason at all: a client that treats its absence
+    // as a truncated response (pi: "Stream ended without finish_reason") rejects every reply. Codex
+    // never tripped on it because it drives /responses, not /chat/completions.
+    // "tool_use" is canonical; OpenAI spells it "tool_calls" — same mapping the non-streaming path uses.
+    const finish = chunk.finishReason === "tool_use" ? "tool_calls" : (chunk.finishReason ?? "stop");
+    const finishChunk = { id, object: "chat.completion.chunk", created: 0, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] };
+    let out = `data: ${JSON.stringify(finishChunk)}\n\n`;
     if (chunk.usage) {
       const u = { prompt_tokens: chunk.usage.promptTokens, completion_tokens: chunk.usage.completionTokens, total_tokens: chunk.usage.promptTokens + chunk.usage.completionTokens };
       const usageChunk = { id, object: "chat.completion.chunk", created: 0, model, choices: [], usage: u };
-      return `data: ${JSON.stringify(usageChunk)}\n\ndata: [DONE]\n\n`;
+      out += `data: ${JSON.stringify(usageChunk)}\n\n`;
     }
-    return "data: [DONE]\n\n";
+    return out + "data: [DONE]\n\n";
   }
   let delta: Record<string, unknown> = {};
   if (chunk.kind === "text") delta = { content: chunk.delta };

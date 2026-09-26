@@ -34,3 +34,17 @@ export class RunawayGuard {
     return false;
   }
 }
+
+// The human-readable error string recorded on a runaway-cut 200. Two mechanisms trip a cut and they
+// mean OPPOSITE things, so they must NOT share one blanket "model degenerated" message:
+//   - repetition / max_output → the model genuinely degenerated (looped a token, or blew the char
+//     cap) and was killed. "degenerated" is accurate.
+//   - deadline → the wall-clock backstop fired on an otherwise-healthy stream that was simply long
+//     (e.g. Opus over a 1M window with reasoning). The model did NOT degenerate; saying so misleads.
+// A single mislabeled string here is exactly what made a plain slow turn look like a broken model.
+export function runawayErrorText(reason: string): string {
+  if (reason === "deadline") {
+    return "runaway stream cut (deadline) — wall-clock timeout, stream ran long and was ended early as max_tokens";
+  }
+  return `runaway stream cut (${reason}) — model degenerated, ended early as max_tokens`;
+}

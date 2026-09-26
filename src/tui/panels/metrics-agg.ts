@@ -26,6 +26,17 @@ export function estimateCost(model: string, tokensIn: number, tokensOut: number)
   return (tokensIn * r.in + tokensOut * r.out) / 1_000_000;
 }
 
+// The same indicative $/1M list price, in the four-rate shape a client config wants (pi's models.json).
+// Sharing PRICING means a third-party client's session cost readout agrees with our own /metrics
+// estimate instead of drifting from a second, private table. Cache rates aren't in PRICING — they
+// follow the ratios the providers publish across the board: a cache read is ~0.1x input, a cache write
+// ~1.25x. Still an estimate, not a bill: Copilot is flat-fee.
+export interface ListPrice { input: number; output: number; cacheRead: number; cacheWrite: number }
+export function listPrice(model: string): ListPrice {
+  const r = rate(model);
+  return { input: r.in, output: r.out, cacheRead: r.in * 0.1, cacheWrite: r.in * 1.25 };
+}
+
 // Shared display formatters so every surface that renders metrics — the /metrics card (app.tsx), the
 // /metrics + /logs slash commands, and the assistant's metrics/recent_errors tools — agrees on how a
 // token count and a cost look. Token counts compress to "39.6k"; cost shows 3 decimals under $1 (so a

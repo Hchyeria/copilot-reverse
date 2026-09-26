@@ -127,9 +127,14 @@ function renderDoctor(checks) {
 function scopeCell(s, model) { return s ? '<span class="ok">✓ ' + esc((model || "on").replace(/\\[1m\\]$/, "")) + "</span>" : '<span class="muted">○</span>'; }
 function renderClients(cl) {
   const el = document.getElementById("clients");
-  if (!cl || (!cl.claude && !cl.codex)) { el.innerHTML = '<span class="empty">no client config</span>'; return; }
-  const row = (name, c) => "<tr><td>" + name + "</td><td>" + scopeCell(c.user, c.userModel) + "</td><td>" + scopeCell(c.project, c.projectModel) + "</td></tr>";
-  el.innerHTML = "<table><tr><th>client</th><th>user</th><th>project</th></tr>" + row("claude", cl.claude) + row("codex", cl.codex) + "</table>";
+  if (!cl || (!cl.claude && !cl.codex && !cl.pi)) { el.innerHTML = '<span class="empty">no client config</span>'; return; }
+  // pi has no project-scoped config, so its project cell is n/a ("–"), not an "○" that would read as
+  // "configured for the user but off for this project".
+  const row = (name, c, projectCell) => "<tr><td>" + name + "</td><td>" + scopeCell(c.user, c.userModel) + "</td><td>" + (projectCell || scopeCell(c.project, c.projectModel)) + "</td></tr>";
+  el.innerHTML = "<table><tr><th>client</th><th>user</th><th>project</th></tr>"
+    + row("claude", cl.claude) + row("codex", cl.codex)
+    + (cl.pi ? row("pi", cl.pi, '<span class="muted" title="pi has no project-level config">–</span>') : "")
+    + "</table>";
 }
 function renderModels(models) {
   const el = document.getElementById("models");

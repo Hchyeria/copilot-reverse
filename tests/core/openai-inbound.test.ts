@@ -35,15 +35,27 @@ describe("openai inbound", () => {
     expect(out.usage.total_tokens).toBe(4);
   });
 
-  it("formats a text SSE chunk and DONE", () => {
+  it("formats a text SSE chunk and closes with a finish_reason chunk before [DONE]", () => {
     expect(canonicalChunkToOpenAISSE({ kind: "text", delta: "he", done: false }, "id", "m")).toContain('"content":"he"');
-    expect(canonicalChunkToOpenAISSE({ kind: "done", done: true }, "id", "m")).toBe("data: [DONE]\n\n");
+    // A stream that ends WITHOUT a finish_reason chunk reads as truncated to a strict client (pi
+    // rejects it outright: "Stream ended without finish_reason"), so the terminal choice is mandatory.
+    const out = canonicalChunkToOpenAISSE({ kind: "done", done: true }, "id", "m");
+    expect(out).toContain('"finish_reason":"stop"');
+    expect(out).toContain('"delta":{}');
+    expect(out.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
-  it("emits a usage chunk before [DONE] when the done chunk carries usage", () => {
+  it("maps a tool-call finish to OpenAI's tool_calls, like the non-streaming path", () => {
+    const out = canonicalChunkToOpenAISSE({ kind: "done", done: true, finishReason: "tool_use" }, "id", "m");
+    expect(out).toContain('"finish_reason":"tool_calls"');
+  });
+
+  it("emits finish_reason, then usage, then [DONE] when the done chunk carries usage", () => {
     const out = canonicalChunkToOpenAISSE({ kind: "done", done: true, usage: { promptTokens: 12, completionTokens: 3 } }, "id", "m");
     expect(out).toContain('"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}');
     expect(out.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    // Order matters: the finish chunk precedes the usage-only chunk, as in a real OpenAI stream.
+    expect(out.indexOf('"finish_reason":"stop"')).toBeLessThan(out.indexOf('"usage"'));
   });
 
   it("normalizes array-of-text-block content (split system prompts) into a single text block", () => {

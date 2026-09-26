@@ -11,12 +11,12 @@ export interface ConfigInfo {
   dataDir: string;
 }
 
-export type ConfigAction = "model" | "setup-claude" | "setup-codex" | "network" | "back";
+export type ConfigAction = "model" | "setup-claude" | "setup-codex" | "setup-pi" | "network" | "back";
 
 export function ConfigScreen({ info, model, clients, accessMode, onAction }: {
   info: ConfigInfo;
   model: string;
-  clients: { claude: boolean; codex: boolean };
+  clients: { claude: boolean; codex: boolean; pi: boolean };
   accessMode?: "localhost" | "lan";
   onAction: (action: ConfigAction) => void;
 }) {
@@ -31,7 +31,7 @@ export function ConfigScreen({ info, model, clients, accessMode, onAction }: {
       {row("Anthropic", info.anthropic)}
       {row("ports", `supervisor ${info.supervisorPort} · worker ${info.workerPort}`)}
       {accessMode && row("network", accessMode === "lan" ? "LAN (key required)" : "localhost (private)")}
-      {row("clients", `claude ${clients.claude ? "✓" : "○"}  codex ${clients.codex ? "✓" : "○"}`)}
+      {row("clients", `claude ${clients.claude ? "✓" : "○"}  codex ${clients.codex ? "✓" : "○"}  pi ${clients.pi ? "✓" : "○"}`)}
       {row("data dir", info.dataDir)}
       <Text> </Text>
       <Select
@@ -40,6 +40,7 @@ export function ConfigScreen({ info, model, clients, accessMode, onAction }: {
           { label: "network access mode", value: "network" },
           { label: "configure Claude Code", value: "setup-claude" },
           { label: "configure Codex", value: "setup-codex" },
+          { label: "configure pi", value: "setup-pi" },
           { label: "back", value: "back" },
         ]}
         onSubmit={(v) => onAction(v.value as ConfigAction)}

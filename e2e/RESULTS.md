@@ -3,6 +3,13 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-26 (setup-pi merge with v0.23.2)** — resolved setup/model-discovery/TUI/worker
+  conflicts while retaining pi setup, GHE session routing, Claude model mapping, and stream deadline
+  diagnostics. Added pi-catalog coverage for the enterprise inference origin/token and fail-closed
+  endpoint contract errors. Verification under Node 26: TypeScript build clean; **949/949 full Vitest
+  tests** and **100/100 Vitest E2E passed**. Docker HTTP and live CLI E2E were not run because the
+  Docker executable is unavailable; the live CLI fidelity gate remains required before PR merge.
+
 - **2026-09-15 (GitHub.com + GHE.com login)** — added an interactive two-provider login flow while
   preserving GitHub.com's embedded device authorization with no GitHub CLI dependency. GHE.com validates
   `SUBDOMAIN.ghe.com`, delegates credentials to `gh`, stores only connection metadata, routes GitHub REST

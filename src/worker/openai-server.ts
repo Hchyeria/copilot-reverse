@@ -7,11 +7,13 @@ import { responsesRequestToCanonical, canonicalToResponsesResponse, ResponsesSSE
 import { shrinkImagesInPlace } from "../core/image-resize.js";
 import { editImageContextInPlace } from "../core/context-edit.js";
 import { errorHint, classifyError } from "./errors.js";
-import { RunawayGuard } from "../core/stream-guard.js";
+import { RunawayGuard, runawayErrorText } from "../core/stream-guard.js";
 
 // Cut a single streaming turn that degenerates (model repeats one short token forever, never stops)
 // so the client gets a bounded answer instead of a frozen session. Mirrors the Anthropic backend.
-const STREAM_DEADLINE_MS = 120_000;
+// 10 minutes: long enough for a legitimate large-model reasoning+answer turn, short enough to bound
+// a truly endless stream. Kept in sync with anthropic-server's STREAM_DEADLINE_MS.
+const STREAM_DEADLINE_MS = 600_000;
 
 export function mountOpenAI(app: Express, router: Router, onMetric: MetricSink): void {
   // Model discovery — OpenAI list shape. Clients (LiteLLM-style gateways, "test connection" probes)
@@ -50,7 +52,7 @@ export function mountOpenAI(app: Express, router: Router, onMetric: MetricSink):
           if (Date.now() > deadline) { runawayReason = "deadline"; break; }
         }
         res.end();
-        metric(200, { tokensIn: usage?.promptTokens, tokensOut: usage?.completionTokens, error: runawayReason ? `runaway stream cut (${runawayReason}) — model degenerated, ended early` : undefined });
+        metric(200, { tokensIn: usage?.promptTokens, tokensOut: usage?.completionTokens, error: runawayReason ? runawayErrorText(runawayReason) : undefined });
       } else {
         const resp = await provider.complete(canon);
         res.json(canonicalToOpenAIResponse(resp));
@@ -109,7 +111,7 @@ export function mountOpenAI(app: Express, router: Router, onMetric: MetricSink):
         }
         for (const f of sse.finish(usage, finish, argsByIdx)) res.write(f);
         res.end();
-        metric(200, { tokensIn: usage?.promptTokens, tokensOut: usage?.completionTokens, error: runawayReason ? `runaway stream cut (${runawayReason}) — model degenerated, ended early` : undefined });
+        metric(200, { tokensIn: usage?.promptTokens, tokensOut: usage?.completionTokens, error: runawayReason ? runawayErrorText(runawayReason) : undefined });
       } else {
         const resp = await provider.complete(canon);
         res.json(canonicalToResponsesResponse(resp));

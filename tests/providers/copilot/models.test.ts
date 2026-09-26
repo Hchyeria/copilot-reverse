@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { fetchModelEndpoints, fetchModelReasoningSupport, fetchModelOneMSupport, fetchModelDiscovery } from "../../../src/providers/copilot/models.js";
+import { fetchModelEndpoints, fetchModelReasoningSupport, fetchModelOneMSupport, fetchCopilotModelCatalog, fetchModelDiscovery } from "../../../src/providers/copilot/models.js";
 import { CopilotEndpointContractError } from "../../../src/providers/copilot/token.js";
 import type { GitHubConnection } from "../../../src/shared/github-connection.js";
 
@@ -132,5 +132,101 @@ describe("fetchModelOneMSupport", () => {
   it("returns an empty set when the endpoint fails", async () => {
     const f = vi.fn(async () => new Response("", { status: 500 }));
     expect((await fetchModelOneMSupport("tok", f as unknown as typeof fetch)).size).toBe(0);
+  });
+});
+
+describe("fetchCopilotModelCatalog", () => {
+  const payload = {
+    data: [
+      {
+        id: "claude-opus-4.8", name: "Claude Opus 4.8",
+        capabilities: { type: "chat", limits: { max_context_window_tokens: 200_000, max_output_tokens: 64_000 }, supports: { vision: true, reasoning_effort: ["low", "medium", "high"] } },
+      },
+      { id: "gpt-4o", name: "GPT-4o", capabilities: { type: "chat", limits: { max_prompt_tokens: 128_000 }, supports: { vision: true } } },
+      { id: "text-embedding-3-small", name: "Embedding", capabilities: { type: "embeddings" } },
+      { id: "bare" }, // no capabilities at all
+    ],
+  };
+
+  it("returns the full definition each model needs in a client config", async () => {
+    const f = vi.fn(async () => json(payload));
+    const out = await fetchCopilotModelCatalog("tok", f as unknown as typeof fetch);
+    const opus = out.find((m) => m.id === "claude-opus-4.8")!;
+    expect(opus).toEqual({
+      id: "claude-opus-4.8", name: "Claude Opus 4.8",
+      contextWindow: 200_000, maxOutputTokens: 64_000,
+      vision: true, reasoningEfforts: ["low", "medium", "high"],
+    });
+  });
+
+  it("uses the session origin and token for the pi catalog", async () => {
+    const source = {
+      get: async () => "legacy-token",
+      getSession: async () => ({
+        token: "enterprise-token", expiresAtMs: 9_999_999_999_000,
+        inferenceOrigin: "https://copilot.acme.ghe.com",
+      }),
+    };
+    const f = vi.fn(async (_url: unknown, _init?: RequestInit) => json(payload));
+    const out = await fetchCopilotModelCatalog(source, f as unknown as typeof fetch);
+    expect(out.map((m) => m.id)).toContain("claude-opus-4.8");
+    expect(f.mock.calls[0][0]).toBe("https://copilot.acme.ghe.com/models");
+    expect(f.mock.calls[0][1]?.headers).toMatchObject({ authorization: "Bearer enterprise-token" });
+  });
+
+  it("propagates enterprise endpoint contract errors for the pi catalog", async () => {
+    const error = new CopilotEndpointContractError({ type: "ghecom", host: "acme.ghe.com" } satisfies GitHubConnection);
+    const source = { get: async () => "legacy-token", getSession: async () => { throw error; } };
+    const f = vi.fn();
+    await expect(fetchCopilotModelCatalog(source, f as unknown as typeof fetch)).rejects.toBe(error);
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it("drops non-chat models so an embedding can never reach a picker or a generated config", async () => {
+    const f = vi.fn(async () => json(payload));
+    const out = await fetchCopilotModelCatalog("tok", f as unknown as typeof fetch);
+    expect(out.map((m) => m.id)).not.toContain("text-embedding-3-small");
+  });
+
+  it("fills sane defaults for a model whose payload omits the metadata", async () => {
+    const f = vi.fn(async () => json(payload));
+    const out = await fetchCopilotModelCatalog("tok", f as unknown as typeof fetch);
+    // A capability-less entry is treated as chat (missing type != non-chat) and gets defaults, not NaN.
+    expect(out.find((m) => m.id === "bare")).toEqual({
+      id: "bare", name: "bare", contextWindow: 128_000, maxOutputTokens: 16_384, vision: false, reasoningEfforts: [],
+    });
+    // max_prompt_tokens stands in for an absent context window, same as fetchModelLimits.
+    expect(out.find((m) => m.id === "gpt-4o")!.contextWindow).toBe(128_000);
+    expect(out.find((m) => m.id === "gpt-4o")!.reasoningEfforts).toEqual([]);
+  });
+
+  it("returns [] when the endpoint fails, so a caller says 'unreachable' instead of writing a guess", async () => {
+    const f = vi.fn(async () => new Response("", { status: 500 }));
+    expect(await fetchCopilotModelCatalog("tok", f as unknown as typeof fetch)).toEqual([]);
+  });
+});
+
+describe("fetchModelDiscovery", () => {
+  it("derives ids, endpoints, reasoning and 1M sets from ONE fetch", async () => {
+    const f = vi.fn(async () => json({ data: [
+      { id: "claude-opus-4.8", supported_endpoints: ["/chat/completions"], capabilities: { limits: { max_context_window_tokens: 1_000_000 }, supports: { reasoning_effort: ["low", "high"] } } },
+      { id: "gpt-4o", capabilities: { limits: { max_context_window_tokens: 128_000 } } },
+    ] }));
+    const d = (await fetchModelDiscovery("tok", f as unknown as typeof fetch))!;
+    // The worker used to make four separate calls for this same payload; Copilot serializes them, so
+    // all four raced one 8s timeout and degraded together.
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(d.ids).toEqual(["claude-opus-4.8", "gpt-4o"]);
+    expect(d.endpoints).toEqual({ "claude-opus-4.8": ["/chat/completions"] });
+    expect([...d.reasoning]).toEqual(["claude-opus-4.8"]);
+    expect([...d.oneM]).toEqual(["claude-opus-4.8"]);
+  });
+
+  it("marks an empty model list as non-live", async () => {
+    const f = vi.fn(async () => json({ data: [] }));
+    const out = await fetchModelDiscovery("tok", f as unknown as typeof fetch);
+    expect(out.live).toBe(false);
+    expect(out.ids.length).toBeGreaterThan(0);
+    expect(out.limits).toEqual({});
   });
 });

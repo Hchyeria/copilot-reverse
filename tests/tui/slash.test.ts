@@ -143,6 +143,18 @@ describe("slash commands", () => {
     await reg.run("/reset-codex");
     expect(calls).toEqual(["codex"]);
   });
+  it("/reset-pi invokes the reset handler for pi", async () => {
+    const calls: string[] = [];
+    const reg = buildRegistry(ctx() as any, endpoint, { resetClient: async (c) => { calls.push(c); return ["ok"]; } });
+    await reg.run("/reset-pi");
+    expect(calls).toEqual(["pi"]);
+  });
+  it("/setup-pi is a known command (the App opens the picker) and is listed in /help", async () => {
+    const reg = buildRegistry(ctx() as any, endpoint, {});
+    const out = await reg.run("/setup-pi");
+    expect(out.join("\n")).not.toMatch(/unknown command/);
+    expect((await reg.run("/help")).join("\n")).toMatch(/\/setup-pi/);
+  });
   it("/login invokes the login handler", async () => {
     let called = false;
     const reg = buildRegistry(ctx() as any, endpoint, { login: async () => { called = true; return ["enter code: ABCD-1234"]; } });
