@@ -2,6 +2,8 @@ export interface SlashContext {
   client: {
     status(): Promise<import("../../shared/control-types.js").StatusResponse>;
     restart(): Promise<void>; stop(): Promise<void>; start(): Promise<void>;
+    recordStart(): Promise<import("../../shared/recording.js").RecordingStatus>;
+    recordEnd(): Promise<import("../../shared/recording.js").RecordingStatus>;
     doctor(ping?: boolean): Promise<import("../../shared/control-types.js").DoctorCheck[]>;
     requests(): Promise<import("../../shared/control-types.js").MetricSample[]>;
     metrics(): Promise<import("../../shared/control-types.js").MetricsResponse>;

@@ -40,6 +40,25 @@ describe("DaemonClient", () => {
     expect(f.mock.calls[0][0]).toBe("http://x/api/stop");
     expect(f.mock.calls[1][0]).toBe("http://x/api/start");
   });
+  it("posts recording commands and returns the worker status", async () => {
+    const status = { active: true, directory: "/private/session", requests: 2, inFlight: 1 };
+    const f = vi.fn(async (_url: string, _init?: RequestInit) => json(status));
+    const c = new DaemonClient("http://x", f as typeof fetch);
+    expect(await c.recordStart()).toEqual(status);
+    expect(await c.recordEnd()).toEqual(status);
+    expect(f.mock.calls).toEqual([
+      ["http://x/api/recording/start", { method: "POST" }],
+      ["http://x/api/recording/end", { method: "POST" }],
+    ]);
+  });
+  it.each(["recordStart", "recordEnd"] as const)("%s checks HTTP status and surfaces the supervisor error", async (method) => {
+    const f = vi.fn(async () => new Response(JSON.stringify({ error: "worker disconnected" }), { status: 503 }));
+    await expect(new DaemonClient("http://x", f as typeof fetch)[method]()).rejects.toThrow(/HTTP 503.*worker disconnected/);
+  });
+  it("offers an actionable fallback for an older supervisor's non-JSON error", async () => {
+    const f = vi.fn(async () => new Response("not found", { status: 404 }));
+    await expect(new DaemonClient("http://x", f as typeof fetch).recordStart()).rejects.toThrow(/HTTP 404.*check \/status/);
+  });
   it("unwraps the requests array", async () => {
     const f = vi.fn(async () => json({ requests: [{ ts: 1, endpoint: "/v1/messages", model: "m", status: 200, latencyMs: 4 }] }));
     const reqs = await new DaemonClient("http://x", f as unknown as typeof fetch).requests();

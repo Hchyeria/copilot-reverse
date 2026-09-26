@@ -1,7 +1,17 @@
 import { fork, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import type { RestartPolicy, AppConfig } from "../shared/config.js";
 import type { WorkerToSupervisor } from "../shared/ipc.js";
 import type { WorkerState } from "../shared/control-types.js";
+import type { RecordingAction, RecordingStatus } from "../shared/recording.js";
+
+interface PendingRecording {
+  resolve: (status: RecordingStatus) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  sequence: number;
+  statusVersion: number;
+}
 
 export interface RestartDecision { backoffMs: number; markedUnhealthy: boolean; crashesInWindow: number }
 
@@ -32,6 +42,11 @@ export class WorkerMonitor {
   private stderrTail = "";
   private state: WorkerState = "starting";
   private stopped = false;
+  private recorded: RecordingStatus = { active: false, requests: 0, inFlight: 0 };
+  private recordingPending = new Map<string, PendingRecording>();
+  private recordingSequence = 0;
+  private lastRecordingReply = 0;
+  private recordingStatusVersion = 0;
   // The single pending respawn (crash backoff / unhealthy cooldown). Tracked so a manual restart or
   // stop() can CANCEL it — otherwise a backoff respawn fires alongside the restart's respawn and the
   // two race for :7891 (EADDRINUSE). Invariant: at most one respawn is ever scheduled at a time.
@@ -49,10 +64,74 @@ export class WorkerMonitor {
   constructor(private config: AppConfig, private workerEntry: string, private hooks: MonitorHooks, private bindHostProvider?: () => string) {
     this.controller = new RestartController(config.restart);
   }
-  start(): void { this.spawn(); }
+  start(): void {
+    if (this.restartPromise) { this.stopped = false; return; }
+    if (this.child?.connected && !this.stopped) return;
+    this.stopped = false;
+    this.spawn();
+  }
   currentState(): WorkerState { return this.state; }
+  recordingStatus(): RecordingStatus { return { ...this.recorded }; }
+  async recording(action: RecordingAction): Promise<RecordingStatus> {
+    const child = this.child;
+    if (!child?.connected || child.killed || this.stopped || this.restartPromise || this.state !== "ready") {
+      throw new Error("Recording unavailable: worker is not ready — start the worker and try again.");
+    }
+    const id = randomUUID();
+    return new Promise<RecordingStatus>((resolve, reject) => {
+      const fail = (error: Error) => {
+        const pending = this.recordingPending.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        this.recordingPending.delete(id);
+        reject(error);
+      };
+      const timer = setTimeout(() => fail(new Error(`Recording ${action} timed out after 5s — check /status before retrying.`)), 5000);
+      this.recordingPending.set(id, { resolve, reject, timer, sequence: ++this.recordingSequence, statusVersion: this.recordingStatusVersion });
+      try {
+        child.send({ type: "recording-command", id, action }, (error: Error | null) => {
+          if (error) fail(new Error(`Recording ${action} failed: ${error.message}`));
+        });
+      } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
+    });
+  }
+  private invalidateRecording(reason: string): void {
+    for (const pending of this.recordingPending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(`Recording unavailable: ${reason}`));
+    }
+    this.recordingPending.clear();
+    const incomplete = this.recorded.active || this.recorded.inFlight > 0;
+    this.recorded = {
+      ...this.recorded, active: false, inFlight: 0,
+      warning: [this.recorded.warning, incomplete ? `${reason}; recording may be incomplete.` : undefined].filter(Boolean).join(" ") || undefined,
+    };
+  }
+  private handleRecordingMessage(m: WorkerToSupervisor): void {
+    if (m.type === "recording-status") {
+      this.recordingStatusVersion++;
+      this.recorded = { ...m.status };
+    } else if (m.type === "recording-reply") {
+      const pending = this.recordingPending.get(m.id);
+      // Timed-out/previous-generation replies are not status updates.
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.recordingPending.delete(m.id);
+      if (m.error) { pending.reject(new Error(m.error)); return; }
+      if (!m.status) { pending.reject(new Error("Worker recording reply omitted status.")); return; }
+      // An older command reply must not overwrite a newer reply or a pushed status received since
+      // the command was sent (e.g. an in-flight recording finished while end was flushing).
+      if (pending.sequence > this.lastRecordingReply && pending.statusVersion === this.recordingStatusVersion) {
+        this.recorded = { ...m.status };
+        this.lastRecordingReply = pending.sequence;
+      }
+      pending.resolve({ ...m.status });
+    }
+  }
   private set(s: WorkerState): void { this.state = s; this.hooks.onStateChange(s); }
   private spawn(): void {
+    this.invalidateRecording("worker replaced");
+    this.recorded = { active: false, requests: 0, inFlight: 0 };
     this.set("starting");
     const bindHost = this.bindHostProvider?.() ?? this.config.bindHost;
     const child = fork(this.workerEntry, [], {
@@ -63,14 +142,24 @@ export class WorkerMonitor {
     this.stderrTail = "";
     child.stderr?.on("data", (d: Buffer) => { this.stderrTail = (this.stderrTail + d.toString()).slice(-4000); });
     child.on("message", (m: WorkerToSupervisor) => {
+      if (this.child !== child || this.stopped || !child.connected) return;
       if (m.type === "ready") {
         this.controller.reset(); this.set("ready");
         this.resolveRestart?.();
         this.clearRestartPromise();
       }
+      this.handleRecordingMessage(m);
       this.hooks.onWorkerMessage(m);
     });
+    child.on("disconnect", () => {
+      if (this.child !== child) return;
+      this.invalidateRecording("worker disconnected");
+      if (!this.stopped) this.set("crashed");
+    });
     child.on("exit", (code) => {
+      if (this.child !== child) return;
+      this.child = undefined;
+      this.invalidateRecording("worker exited");
       if (this.stopped) return;
       if (this.rejectRestart) {
         this.rejectRestart(new Error(`worker exited before ready (exit ${code ?? "unknown"})${this.stderrTail ? `: ${this.stderrTail}` : ""}`));
@@ -109,6 +198,7 @@ export class WorkerMonitor {
   restartManually(): Promise<void> {
     // Concurrent callers observe the same replacement outcome; they must not trigger another spawn.
     if (this.restartPromise) return this.restartPromise;
+    this.invalidateRecording("worker restarting");
     this.restartPromise = new Promise<void>((resolve, reject) => {
       this.resolveRestart = resolve;
       this.rejectRestart = reject;
@@ -122,7 +212,8 @@ export class WorkerMonitor {
     // line (the old behavior) raced the dying worker → "listen EADDRINUSE :7891". Defer the spawn to
     // the old child's REAL exit; resolve only after the replacement emits its ready IPC message.
     if (child && child.connected) {
-      this.child = undefined;
+      this.set("starting");
+      this.child = undefined;                       // detach: its later crash-path exit must not run
       child.removeAllListeners("exit");
       child.once("exit", () => { if (!this.stopped) this.spawn(); });
       child.kill();
@@ -133,6 +224,7 @@ export class WorkerMonitor {
   }
   stop(): void {
     this.stopped = true;
+    this.invalidateRecording("worker stopped");
     if (this.rejectRestart) {
       this.rejectRestart(new Error("worker restart cancelled"));
       this.clearRestartPromise();

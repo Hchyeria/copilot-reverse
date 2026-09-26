@@ -3,6 +3,18 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-26 (manual request recording)** — `/record-start` / `/record-end`, private per-request
+  artifacts, full upstream error/SSE bodies, and debounced batch writes. `npm test`: **84 files,
+  780 tests PASS**. `npm run test:e2e`: **10 files, 49 tests PASS**. `npm run build`,
+  `git diff --check`, and `node --check e2e/docker/http-e2e.mjs`: **PASS**. New offline e2e forks the
+  real worker source on a free port with an isolated HOME and disabled external fetch; verifies real
+  monitor IPC + control HTTP start/end, original request bytes, malformed JSON, and restart-to-off.
+  Unit/integration coverage includes 408/429/413 full bodies, concurrent fallback attempts, UTF-8,
+  large requests, SSE errors, write failures, debounce/max-wait/size flush, and in-flight draining.
+  Docker HTTP recording cases added but **NOT RUN: `docker: command not found`**. Live CLI/Copilot
+  fidelity gate **NOT RUN** (no Docker; no live quota used). These remain required before merge;
+  local tests are not a substitute for the Docker/live CLI gate. No running user daemon was changed.
+
 - **Pi provider split / personal-use cleanup (pre-push verification)** — `npm test` passed
   **949/949 tests across 89 files**, including Vitest E2E; `npm run build` passed.
   Docker HTTP and live Copilot CLI E2E were not run for this commit/push.

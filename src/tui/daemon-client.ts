@@ -1,4 +1,5 @@
 import type { StatusResponse, DoctorCheck, MetricSample, MetricsResponse } from "../shared/control-types.js";
+import type { RecordingStatus } from "../shared/recording.js";
 
 export class DaemonClient {
   constructor(private base: string, private fetchFn: typeof fetch = fetch) {}
@@ -16,6 +17,20 @@ export class DaemonClient {
   async restart(): Promise<void> { return this.post("/api/restart"); }
   async stop(): Promise<void> { return this.post("/api/stop"); }
   async start(): Promise<void> { return this.post("/api/start"); }
+  private async record(action: "start" | "end"): Promise<RecordingStatus> {
+    const response = await this.fetchFn(`${this.base}/api/recording/${action}`, { method: "POST" });
+    if (!response.ok) {
+      let detail = "check /status and ensure the worker is ready";
+      try {
+        const body = await response.json() as { error?: string };
+        if (typeof body.error === "string") detail = body.error;
+      } catch { /* old supervisor / non-JSON error: retain the actionable fallback */ }
+      throw new Error(`Recording ${action} failed (HTTP ${response.status}): ${detail}`);
+    }
+    return await response.json() as RecordingStatus;
+  }
+  async recordStart(): Promise<RecordingStatus> { return this.record("start"); }
+  async recordEnd(): Promise<RecordingStatus> { return this.record("end"); }
   // ping=true runs the slower per-configured-model connectivity probe; default (false) is the cheap
   // light check (also what the dashboard polls). The TUI /doctor passes true.
   async doctor(ping = false): Promise<DoctorCheck[]> { return ((await (await this.fetchFn(`${this.base}/api/doctor${ping ? "?ping=1" : ""}`)).json()) as { checks: DoctorCheck[] }).checks; }

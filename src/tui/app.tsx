@@ -20,6 +20,8 @@ import type { Scope, ApplyResult } from "./setup/apply.js";
 import type { ClientStatus, ScopeStatus } from "./setup/status.js";
 import { theme } from "./theme.js";
 import type { Registry } from "./slash/registry.js";
+import { recordingLines } from "./slash/commands.js";
+import type { RecordingStatus } from "../shared/recording.js";
 import { withCost, fmtTokens as k, fmtCost as usd, type Aggregate } from "./panels/metrics-agg.js";
 import type { WorkerState, StatusResponse, MetricsResponse } from "../shared/control-types.js";
 import type { WebSearchBackend } from "../shared/webiq-key.js";
@@ -51,6 +53,21 @@ const sameScope = (a: ScopeStatus, b: ScopeStatus): boolean =>
   a.user === b.user && a.project === b.project && a.userModel === b.userModel && a.projectModel === b.projectModel;
 export const sameStatus = (a: ClientStatus, b: ClientStatus): boolean =>
   sameScope(a.claude, b.claude) && sameScope(a.codex, b.codex) && sameScope(a.pi, b.pi);
+
+export const sameRecordingStatus = (a: RecordingStatus | undefined, b: RecordingStatus | undefined): boolean =>
+  a === b || (!!a && !!b && a.active === b.active && a.directory === b.directory &&
+    a.requests === b.requests && a.inFlight === b.inFlight && a.warning === b.warning);
+
+export function RecordingHud({ status }: { status?: RecordingStatus }) {
+  if (!status) return null;
+  return (
+    <Box flexDirection="column">
+      <Text color={status.active ? theme.error : theme.muted}>{recordingLines(status)[0]}</Text>
+      {status.directory && <Text color={theme.muted}>  {status.directory}</Text>}
+      {status.warning && <Text color={theme.error}>REC WARNING: {oneLine(status.warning, 500)}</Text>}
+    </Box>
+  );
+}
 
 // Startup overview card. GitHub shows a login STATE (no real token expiry exists). Web search shows
 // the resolved backend: "via WebIQ", "via Copilot (native)", or "unavailable — run /webiq".
@@ -260,6 +277,11 @@ export function App({
   ]);
   useEffect(() => { if (changeBanner) onChangeSeen?.(); }, []);
   const [state, setState] = useState<WorkerState>(workerState);
+  const [recording, setRecording] = useState<RecordingStatus>();
+  // Shared by polling and immediate post-command refreshes. A late poll must not restore the
+  // pre-command/pre-restart recording state after a newer status response has landed.
+  const statusSequence = useRef(0);
+  const pollStatus = useRef<() => Promise<StatusResponse | undefined>>(async () => undefined);
   const [status, setStatus] = useState<ClientStatus>(() => readStatus?.() ?? EMPTY_STATUS);
   const [webBackend, setWebBackend] = useState<WebSearchBackend>(() => webSearchBackend?.() ?? "unavailable");
   // Network access posture (mode + key + LAN URL), read live; refreshed after a /network change.
@@ -287,22 +309,41 @@ export function App({
   useEffect(() => {
     if (!statusSource && !readStatus) return;
     let alive = true;
-    const tick = async () => {
+    const tick = async (): Promise<StatusResponse | undefined> => {
+      const sequence = ++statusSequence.current;
       try {
         const s = await statusSource?.();
-        if (alive && s) {
+        if (!alive || sequence !== statusSequence.current) return;
+        if (s) {
           setState(s.workerState);
           if (s.github) {
             setGithub(githubLoginState(s.github.hasToken, s.github.ok));
             setGithubHost(s.github.host);
           }
+          // Even if a mixed-version supervisor supplies stale data, a non-ready worker cannot be REC.
+          const next = s.recording && (s.workerState === "ready" ? s.recording : { ...s.recording, active: false, inFlight: 0 });
+          setRecording((prev) => sameRecordingStatus(prev, next) ? prev : next);
         }
-      } catch { /* daemon momentarily down */ }
-      if (alive) refreshStatus(); // HUD reflects the real config files, even if edited externally
+        refreshStatus(); // HUD reflects the real config files, even if edited externally
+        return s;
+      } catch {
+        if (!alive || sequence !== statusSequence.current) return;
+        // A failed poll is not proof that recording ended. Remove the active claim and expose the
+        // uncertainty until an authoritative status arrives, without repainting on repeated failures.
+        setRecording((prev) => {
+          if (!prev) return prev;
+          const unavailable = "Supervisor unavailable; recording state unknown — check /status.";
+          const warning = prev.warning?.includes(unavailable) ? prev.warning : [prev.warning, unavailable].filter(Boolean).join(" ");
+          const next = { ...prev, active: false, inFlight: 0, warning };
+          return sameRecordingStatus(prev, next) ? prev : next;
+        });
+        refreshStatus();
+      }
     };
+    pollStatus.current = tick;
     void tick();
     const id = setInterval(tick, 2000);
-    return () => { alive = false; clearInterval(id); };
+    return () => { alive = false; clearInterval(id); pollStatus.current = async () => undefined; };
   }, [statusSource]);
 
   useEffect(() => {
@@ -359,12 +400,13 @@ export function App({
         try { ghState = await githubStatus(); }
         catch (error) { githubError = error instanceof Error ? error.message : String(error); }
       }
-      let worker = state, restarts: string[] = [];
+      let worker = state, restarts: string[] = [], rec = recording;
       let liveGithubHost = githubHost;
       try {
-        const s = await statusSource?.();
+        const s = await pollStatus.current();
         if (s) {
           worker = s.workerState;
+          rec = s.recording;
           restarts = s.restarts.slice(0, 5).map((r) => `  ${r.reason} exit=${r.exitCode ?? "-"} ${r.stderrTail.slice(0, 60)}`);
           liveGithubHost = s.github?.hasToken ? s.github.host : undefined;
         }
@@ -382,6 +424,7 @@ export function App({
       });
       const extra = [
         ...(githubError ? [`GitHub check   ${githubError}`] : []),
+        ...(rec ? recordingLines(rec) : []),
         ...(restarts.length ? ["", "recent restarts:", ...restarts] : []),
       ];
       add(statusCard(summary, extra, status));
@@ -410,7 +453,10 @@ export function App({
     if (t === "/setup-pi" && setupPi) { setScreen({ kind: "pi" }); return; }
     if (line.startsWith("/")) {
       if (t === "/help") { add({ type: "help", commands: cmds }); return; }
+      const recordingCommand = /^\/record-(start|end)(?:\s|$)/.test(t);
+      if (recordingCommand) statusSequence.current++; // invalidate an older in-flight poll
       const out = await registry.run(line);
+      if (recordingCommand) await pollStatus.current(); // also on command failure: worker may have restarted
       const tone: "info" | "ok" | "error" =
         out.some((l) => /fail|error|unknown/i.test(l)) ? "error" : out.some((l) => /^OK /.test(l)) ? "ok" : "info";
       add({ type: "card", title: t, tone, lines: out });
@@ -661,6 +707,7 @@ export function App({
       {body}
 
       <Box flexDirection="column" paddingX={1}>
+        <RecordingHud status={recording} />
         <Box>
           {github && <><Text color={theme.muted}>github </Text><Text color={github === "connected" ? theme.ready : theme.error}>{github === "connected" ? "✓" : "✗ /login"}</Text></>}
           <Text color={theme.muted}>{github ? "  ·  " : ""}daemon </Text><Text color={stateColor[state]}>{state}</Text>

@@ -40,6 +40,19 @@ fixtures in [`helpers.ts`](./helpers.ts).
 | EP-25 | `setup-codex` | writes native `~/.codex/config.toml` with `model_context_window` |
 | EP-26 | reset after 1M setup | removes every key including the 1M-window keys |
 
+### Manual recording
+
+`tests/e2e/recording-control.test.ts` forks the real worker with an isolated HOME/free port and
+external fetch disabled. The supervisor monitor and control API exercise the real IPC chain.
+`e2e/docker/http-e2e.mjs` includes corresponding container cases with a dummy token.
+
+| ID | Scenario | Expected result |
+|----|----------|-----------------|
+| REC-01 | Fresh worker + recording start via control HTTP | Off initially; enabled state and private session directory returned |
+| REC-02 | Count-tokens and malformed JSON while recording | Original JSON bytes preserved; parser failure captured with client status 400 |
+| REC-03 | End and restart | New requests excluded after end; worker restart resets recording off |
+| REC-04 | Proxy listener receives recording control URL (Docker) | 404; controls exist only on supervisor loopback listener |
+
 ### Codex `/responses` (EP-27 … EP-38)
 
 The OpenAI Responses API end-to-end through a booted worker (Codex speaks only this). Hermetic — fake

@@ -1,3 +1,5 @@
+import type { RecordingStatus } from "./recording.js";
+
 export type WorkerState = "starting" | "ready" | "crashed" | "unhealthy";
 
 export interface RestartRow {
@@ -20,6 +22,7 @@ export interface StatusResponse {
   workerState: WorkerState;
   restarts: RestartRow[];
   github?: GithubStatus; // absent until the heartbeat's first probe completes
+  recording?: RecordingStatus; // absent on older supervisors
 }
 export interface DoctorCheck {
   name: string;
