@@ -128,7 +128,7 @@ describe("manual request recorder", () => {
   it("separates concurrent requests and endpoint fallback attempts", async () => {
     const recorder = new RequestRecorder(await root()); const started = await recorder.start();
     const fn = (async (url, init) => {
-      if (String(url).endsWith("/chat/completions")) return new Response('{"error":"use the responses"}', { status: 400 });
+      if (String(url).endsWith("/chat/completions")) return new Response('{"error":{"code":"unsupported_api_for_model","message":"use the Responses API"}}', { status: 400 });
       return response(JSON.parse(init?.body as string).input[0].content[0].text);
     }) as typeof fetch;
     const app = harness(recorder, fn, ["/chat/completions", "/responses"]);

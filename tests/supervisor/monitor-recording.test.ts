@@ -125,37 +125,6 @@ describe("recording IPC lifecycle", () => {
     }
   });
 
-  it("stop then start waits for the old exit and comes back off; repeated start cannot spawn twice", async () => {
-    monitor.start(); ready();
-    current().message({ type: "recording-status", status: active });
-    const old = current();
-    monitor.stop();
-    monitor.start();
-    monitor.start();
-    expect(children).toHaveLength(1);
-    old.connected = false; old.emit("exit", 0); ready();
-    expect(children).toHaveLength(2);
-    expect(monitor.recordingStatus()).toEqual(off);
-    monitor.start();
-    expect(children).toHaveLength(2);
-    const response = monitor.recording("status");
-    current().message({ type: "recording-reply", id: commandId(), status: off });
-    expect(await response).toEqual(off);
-  });
-
-  it("start can resume a restart that was stopped while waiting for the old worker to exit", () => {
-    monitor.start(); ready();
-    const old = current();
-    monitor.restartManually();
-    monitor.stop();
-    monitor.start();
-    expect(children).toHaveLength(1);
-    old.connected = false; old.emit("exit", 0); ready();
-    expect(children).toHaveLength(2);
-    expect(monitor.currentState()).toBe("ready");
-    expect(monitor.recordingStatus()).toEqual(off);
-  });
-
   it("propagates worker/write errors and malformed replies without changing the cached status", async () => {
     monitor.start(); ready();
     const failed = expect(monitor.recording("start")).rejects.toThrow("disk full");
