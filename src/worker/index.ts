@@ -1,4 +1,6 @@
 import { createWorkerApp } from "./server.js";
+import { join } from "node:path";
+import { RequestRecorder } from "./recording/recorder.js";
 import { Router } from "./router.js";
 import { CopilotAdapter } from "../providers/copilot/adapter.js";
 import { fetchModelDiscovery } from "../providers/copilot/models.js";
@@ -12,7 +14,7 @@ import { dataDir } from "../shared/paths.js";
 import { defaultConfig } from "../shared/config.js";
 import { readClaudeMapSettings } from "../shared/prefs.js";
 import { resolveClaudeModelMap } from "../core/claude-model-map.js";
-import type { WorkerToSupervisor } from "../shared/ipc.js";
+import type { WorkerToSupervisor, SupervisorToWorker } from "../shared/ipc.js";
 import { discoveryBeforeReady } from "./model-discovery.js";
 import { createWorkerCopilotTokenStore } from "./copilot-session.js";
 
@@ -37,12 +39,16 @@ let modelEndpoints: Record<string, string[]> = {};
 // resolves — the adapter then defaults to "supported" so a reasoning turn isn't silently dropped.
 let reasoningModels = new Set<string>();
 let reasoningEfforts: Record<string, string[]> = {};
+const recorder = new RequestRecorder(join(dataDir(), "recordings"), (status) => {
+  send({ type: "recording-status", status });
+  if (status.warning) process.stderr.write(`${status.warning}\n`);
+});
 const claudeMapSettings = readClaudeMapSettings(dataDir());
 const claudeMapEnabled = claudeMapSettings.enabled;
 const router = new Router(
   [new CopilotAdapter(
     tokenStore,
-    fetch,
+    recorder.wrapFetch(fetch),
     (m) => modelEndpoints[m] ?? [],
     (m) => reasoningModels.size === 0 || reasoningModels.has(m),
     (m) => reasoningEfforts[m] ?? [],
@@ -68,7 +74,7 @@ const modelDiscoveryReady = discoveryBeforeReady(claudeMapEnabled, discoverModel
 const gatewayRunner = makeGatewayRunner({
   backend: () => resolveWebSearchBackend(readWebSearchMode(dataDir()), Boolean(readWebIqKey(dataDir()))),
   webiqKey: () => readWebIqKey(dataDir()),
-  borrow: { run: (input) => borrowSearch(tokenStore, input) },
+  borrow: { run: (input) => borrowSearch(tokenStore, input, recorder.wrapFetch(fetch)) },
 });
 // Access control read LAZILY from disk per request (so /network toggles + key rotation need no worker
 // restart). The gate requires a key whenever this worker is reachable off-box: either the live mode is
@@ -78,13 +84,26 @@ const gatewayRunner = makeGatewayRunner({
 // restarts it, so we keep enforcing the key until a fresh loopback-bound worker takes over.
 const exposed = host !== "127.0.0.1" && host !== "::1" && host !== "localhost";
 const access = { mode: () => readAccessMode(dataDir()), key: () => readAccessKey(dataDir()), exposed };
-const app = createWorkerApp(router, (m) => send({ type: "request-metric", ...m }), gatewayRunner, access);
+const app = createWorkerApp(router, (m) => send({ type: "request-metric", ...m }), gatewayRunner, access, undefined, recorder);
 const server = app.listen(port, host, () => {
   void modelDiscoveryReady.then(() => send({ type: "ready", port }));
 });
 const hb = setInterval(() => send({ type: "heartbeat", ts: Date.now() }), 5_000);
 
-process.on("message", (m: { type?: string }) => { if (m?.type === "shutdown") { clearInterval(hb); server.close(() => process.exit(0)); } });
+process.on("message", (m: SupervisorToWorker) => {
+  if (m?.type === "recording-command") {
+    const operation = m.action === "start" ? recorder.start() : m.action === "end" ? recorder.end() : Promise.resolve(recorder.status());
+    void operation.then(
+      (status) => send({ type: "recording-reply", id: m.id, status }),
+      () => send({ type: "recording-reply", id: m.id, error: "Recording storage unavailable; check directory permissions and free disk space" }),
+    );
+  }
+  if (m?.type === "shutdown") {
+    clearInterval(hb);
+    void recorder.end().finally(() => server.close(() => process.exit(0)));
+  }
+});
+process.on("SIGTERM", () => { void recorder.end().finally(() => process.exit(0)); });
 
 // Parent-death guard: a forked child does NOT die when its supervisor dies abnormally (terminal
 // closed, killed, crashed). An orphaned worker keeps holding :7891, so the NEXT supervisor's worker

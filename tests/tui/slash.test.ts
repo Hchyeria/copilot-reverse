@@ -35,6 +35,46 @@ describe("slash commands", () => {
     const out = await reg.run("/status");
     expect(out.join("\n")).toMatch(/worker: ready/i);
   });
+  it("registers recording commands for execution, help, and autocomplete", async () => {
+    const c = { ...ctx(), client: { ...ctx().client,
+      recordStart: vi.fn(async () => ({ active: true, directory: "/private/session", requests: 2, inFlight: 1 })),
+      recordEnd: vi.fn(async () => ({ active: false, directory: "/private/session", requests: 2, inFlight: 1, warning: "incomplete: disk full" })),
+    } };
+    const reg = buildRegistry(c as any, endpoint);
+    for (const name of ["/record-start", "/record-end"]) {
+      expect(reg.list().map((c) => c.name)).toContain(name);
+      expect((await reg.run("/help")).join("\n")).toContain(name);
+    }
+    const start = (await reg.run("/record-start")).join("\n");
+    expect(c.client.recordStart).toHaveBeenCalledOnce();
+    expect(start).toContain("REC active");
+    expect(start).toContain("/private/session");
+    expect(start).toContain("2 requests, 1 in flight");
+    expect(start).toMatch(/bodies.*secrets.*private data/);
+    expect(start).toContain("direct github-copilot traffic is not captured");
+    const end = (await reg.run("/record-end")).join("\n");
+    expect(c.client.recordEnd).toHaveBeenCalledOnce();
+    expect(end).toContain("stopped enrollment; draining");
+    expect(end).toContain("WARNING: incomplete: disk full");
+  });
+  it("recording commands render unavailable/write failures instead of rejecting", async () => {
+    const c = { ...ctx(), client: { ...ctx().client,
+      recordStart: async () => { throw new Error("worker unavailable"); },
+      recordEnd: async () => { throw new Error("disk full\nretry later"); },
+    } };
+    const reg = buildRegistry(c as any, endpoint);
+    expect((await reg.run("/record-start")).join("\n")).toMatch(/failed.*worker unavailable/);
+    const end = await reg.run("/record-end");
+    expect(end[0]).toMatch(/failed.*disk full.*retry later/);
+    expect(end[0]).not.toContain("\n");
+  });
+  it("/status includes the authoritative recording snapshot", async () => {
+    const c = { ...ctx(), client: { ...ctx().client, status: async () => ({ workerState: "ready", restarts: [], recording: { active: false, directory: "/private/session", requests: 4, inFlight: 0 } }) } };
+    const out = (await buildRegistry(c as any, endpoint).run("/status")).join("\n");
+    expect(out).toContain("REC stopped");
+    expect(out).toContain("4 requests, 0 in flight");
+    expect(out).toContain("/private/session");
+  });
   it("/restart calls client", async () => {
     const c = ctx();
     await buildRegistry(c as any, endpoint).run("/restart");

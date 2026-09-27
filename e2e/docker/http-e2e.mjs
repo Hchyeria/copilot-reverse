@@ -9,7 +9,7 @@
 // Exit 0 = all asserted; non-zero = a failure. Mirrors heartbeat-e2e.mjs's check harness.
 
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { connect } from "node:net";
 import { networkInterfaces } from "node:os";
@@ -88,6 +88,37 @@ async function main() {
   try {
     if (!(await ready(supUrl("/api/status")))) throw new Error("supervisor never up");
     if (!(await ready(wrkUrl("/healthz")))) throw new Error("worker never up");
+
+    log("[recording] manual control, parser error, token count, and private artifacts (no upstream call)");
+    {
+      check("recording defaults off", (await jget(supUrl("/api/status"))).j?.recording?.active === false);
+      const start = await jpost(supUrl("/api/recording/start"), "{}");
+      const session = JSON.parse(start.t);
+      check("record-start enabled on worker", start.s === 200 && session.active === true, start.t);
+      check("duplicate record-start reuses directory", JSON.parse((await jpost(supUrl("/api/recording/start"), "{}")).t).directory === session.directory);
+      const raw = '{ "model":"gpt-4o", "messages":[{"role":"user","content":"录制 test"}] }';
+      check("recorded count_tokens works", (await jpost(wrkUrl("/anthropic/v1/messages/count_tokens"), raw, { authorization: "Bearer do-not-record-header" })).s === 200);
+      check("recorded malformed JSON still returns 400", (await jpost(wrkUrl("/openai/responses"), "{bad")).s === 400);
+      let snapshot;
+      for (let i = 0; i < 40; i++) {
+        snapshot = (await jget(supUrl("/api/status"))).j?.recording;
+        if (snapshot?.requests === 2 && snapshot.inFlight === 0) break;
+        await sleep(50);
+      }
+      check("both request recordings finalized", snapshot?.requests === 2 && snapshot?.inFlight === 0, JSON.stringify(snapshot));
+      if (session.directory && existsSync(session.directory)) {
+        const dirs = readdirSync(session.directory, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => join(session.directory, d.name));
+        const bodies = dirs.map((d) => readFileSync(join(d, "inbound.json"), "utf8"));
+        check("original JSON bytes preserved", bodies.includes(raw) && bodies.includes("{bad"));
+        check("auth header not stored", dirs.every((d) => !readFileSync(join(d, "metadata.json"), "utf8").includes("do-not-record-header")));
+        check("parser error captured as client 400", dirs.some((d) => JSON.parse(readFileSync(join(d, "result.json"), "utf8")).clientStatus === 400));
+      } else check("recording directory exists", false);
+      const end = JSON.parse((await jpost(supUrl("/api/recording/end"), "{}")).t);
+      check("record-end stops enrollment", end.active === false && end.requests === 2);
+      await jpost(wrkUrl("/anthropic/v1/messages/count_tokens"), raw);
+      check("requests after end not captured", (await jget(supUrl("/api/status"))).j?.recording?.requests === 2);
+      check("recording control not exposed on proxy", (await jpost(wrkUrl("/api/recording/start"), "{}")).s === 404);
+    }
 
     log("[proxy] error & edge paths (no upstream call)");
     check("malformed JSON → 400", (await jpost(wrkUrl("/anthropic/v1/messages"), "{bad")).s === 400);

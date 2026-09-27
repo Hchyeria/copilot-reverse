@@ -5,6 +5,16 @@ import { openUrl as defaultOpenUrl } from "../../shared/open-url.js";
 import { buildIssueUrl, PLACEHOLDER_REPO } from "../report.js";
 import { APP_CHANGES } from "../../changes.js";
 import { oneLine } from "../../shared/format.js";
+import type { RecordingStatus } from "../../shared/recording.js";
+
+export function recordingLines(s: RecordingStatus): string[] {
+  const state = s.active ? "active" : s.inFlight ? "stopped enrollment; draining" : s.directory ? "stopped" : "off";
+  return [
+    `REC ${state} — ${s.requests} requests, ${s.inFlight} in flight`,
+    ...(s.directory ? [`directory: ${s.directory}`] : []),
+    ...(s.warning ? [`WARNING: ${oneLine(s.warning, 500)}`] : []),
+  ];
+}
 
 export interface RegistryOpts {
   dashboardUrl?: string;            // supervisor URL the /dashboard command opens
@@ -22,7 +32,7 @@ export function buildRegistry(ctx: SlashContext, endpoint: Endpoint, opts: Regis
   const openUrl = opts.openUrl ?? defaultOpenUrl;
   reg.add({ name: "/status", describe: "show worker status + restart history", run: async (_a, c) => {
     const s = await c.client.status();
-    const lines = [`worker: ${s.workerState}`];
+    const lines = [`worker: ${s.workerState}`, ...(s.recording ? recordingLines(s.recording) : [])];
     for (const r of s.restarts.slice(0, 5)) lines.push(`  ${r.reason} exit=${r.exitCode ?? "-"} ${r.stderrTail.slice(0, 60)}`);
     return lines;
   } });
@@ -30,6 +40,24 @@ export function buildRegistry(ctx: SlashContext, endpoint: Endpoint, opts: Regis
   reg.add({ name: "/restart", describe: "restart the worker", run: async (_a, c) => { await c.client.restart(); return ["restart requested"]; } });
   reg.add({ name: "/stop", describe: "stop the worker", run: async (_a, c) => { await c.client.stop(); return ["worker stopped"]; } });
   reg.add({ name: "/start", describe: "start the worker", run: async (_a, c) => { await c.client.start(); return ["worker started"]; } });
+  for (const action of ["start", "end"] as const) {
+    reg.add({
+      name: `/record-${action}`,
+      describe: action === "start" ? "record proxy requests locally (private bodies included)" : "stop recording new requests; let captures drain",
+      run: async (_a, c) => {
+        try {
+          const s = await (action === "start" ? c.client.recordStart() : c.client.recordEnd());
+          return [
+            ...recordingLines(s),
+            "Privacy: full request/response bodies may contain secrets and private data. Keep recordings private; delete them manually.",
+            ...(action === "start" ? ["Only traffic through this proxy is recorded; pi's direct github-copilot traffic is not captured."] : []),
+          ];
+        } catch (error) {
+          return [`recording ${action} failed: ${oneLine(error instanceof Error ? error.message : String(error), 500)}`];
+        }
+      },
+    });
+  }
   reg.add({ name: "/logs", describe: "recent request errors (what failed & why)", run: async (_a, c) => {
     // recentErrors comes from a SQL query over the WHOLE request_log, so errors that scrolled past the
     // last-100-requests window still show (the old path filtered a 100-row fetch and could miss them).

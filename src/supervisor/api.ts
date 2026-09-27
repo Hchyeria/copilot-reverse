@@ -3,6 +3,7 @@ import { listRestarts, recentRequests, aggregateRequests, recentErrorRows, type 
 import { dashboardHtml } from "./dashboard.js";
 import type { WorkerState, DoctorCheck, GithubStatus } from "../shared/control-types.js";
 import type { ClientStatus } from "../tui/setup/status.js";
+import type { RecordingAction, RecordingStatus } from "../shared/recording.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -17,6 +18,8 @@ export interface ControlDeps {
   github: () => GithubStatus | undefined;
   clients: () => ClientStatus;          // per-scope Claude/Codex config read from the real files
   models: () => Promise<DashModel[]>;   // advertised models (proxied from the worker), for the dashboard
+  recording?: (action: RecordingAction) => Promise<RecordingStatus>;
+  recordingStatus?: () => RecordingStatus;
   now?: () => number;                   // clock for the 24h metrics window; injectable for tests
   subscribe: (send: (event: string, data: unknown) => void) => () => void;
 }
@@ -25,7 +28,15 @@ export function createControlApp(deps: ControlDeps): Express {
   const app = express();
   app.use(express.json());
   app.get("/", (_req, res) => res.type("html").send(dashboardHtml()));
-  app.get("/api/status", (_req, res) => res.json({ workerState: deps.getState(), restarts: listRestarts(deps.db, 50), github: deps.github() }));
+  app.get("/api/status", (_req, res) => res.json({ workerState: deps.getState(), restarts: listRestarts(deps.db, 50), github: deps.github(), recording: deps.recordingStatus?.() }));
+  // These routes belong ONLY to the supervisor's loopback listener, never the worker proxy.
+  for (const action of ["start", "end"] as const) {
+    app.post(`/api/recording/${action}`, async (_req, res) => {
+      if (!deps.recording) { res.status(503).json({ error: "Recording controls unavailable — update/restart the supervisor." }); return; }
+      try { res.json(await deps.recording(action)); }
+      catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : String(error) }); }
+    });
+  }
   app.post("/api/restart", async (_req, res) => {
     try { await deps.restart(); res.json({ ok: true }); }
     catch (e) { res.status(503).json({ ok: false, error: e instanceof Error ? e.message : String(e) }); }
