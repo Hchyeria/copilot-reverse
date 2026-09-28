@@ -12,7 +12,7 @@ import { makeGatewayRunner } from "../core/server-tools.js";
 import { borrowSearch } from "../providers/copilot/borrow-search.js";
 import { dataDir } from "../shared/paths.js";
 import { defaultConfig } from "../shared/config.js";
-import { readContextTier, readClaudeMapSettings } from "../shared/prefs.js";
+import { readClaudeMapSettings } from "../shared/prefs.js";
 import { resolveClaudeModelMap } from "../core/claude-model-map.js";
 import type { WorkerToSupervisor, SupervisorToWorker } from "../shared/ipc.js";
 import { discoveryBeforeReady } from "./model-discovery.js";
@@ -59,8 +59,9 @@ const router = new Router(
 // One coherent upstream snapshot feeds fuzzy matching, endpoint/reasoning routing, and context metadata.
 // Mapped aliases are never synthesized from the offline fallback alone: Router requires a live `available`
 // list before publishing or resolving them.
-const discoverModels = () => fetchModelDiscovery(tokenStore, undefined, undefined, readContextTier(dataDir())).then((discovery) => {
+const discoverModels = () => fetchModelDiscovery(tokenStore).then((discovery) => {
   router.setAvailableModels(discovery.ids, discovery.live);
+  router.setModelChoices(discovery.choices);
   router.setOneMModels(discovery.oneM);
   router.setModelLimits(discovery.limits);
   modelEndpoints = discovery.endpoints;

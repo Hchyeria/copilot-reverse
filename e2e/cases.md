@@ -12,7 +12,10 @@ fixtures in [`helpers.ts`](./helpers.ts).
 | ID | Scenario | Expected result |
 |----|----------|-----------------|
 | CTX-01 | `node e2e/docker/http-e2e.mjs --context-only`: fixture discovery → real HTTP model picker | default 272K has no 1M badge, long tier 1M has badge, both resolve unchanged upstream ID; default-only, missing limits and failed discovery never infer 1M in setup/HTTP picker; no live quota |
-| CTX-02 | `e2e/docker/cli-e2e.sh`: actual `copilot-reverse context` CLI with isolated HOME | fresh default → persisted long_context → invalid input rejected without overwriting → default restored; missing live credentials recorded as SKIP |
+| CTX-02 | `e2e/docker/cli-e2e.sh`: actual project CLI with isolated HOME | explains per-model selection; rejects retired global tiers without modifying preferences; missing live credentials recorded as SKIP |
+| CTX-03 | Same worker, fixture-discovered model choices, real HTTP | both GPT/Claude budgets listed; default → long → default without restart; chat, Responses and Anthropic routes strip local suffix before provider call; saved pi aliases still decode when discovery is unavailable |
+| CTX-04 | Actual `pi --list-models` against generated config in isolated HOME | GPT standard 272K and long 1M entries coexist; untiered model has no invented long alias; missing optional pi binary recorded as SKIP |
+| CTX-05 | Assistant runtime turn interface | GPT standard → long → standard updates compaction window 272K → 1M → 272K without process restart |
 | EP-01 | Anthropic `POST /v1/messages` with `stream: true` | SSE contains `message_start`, a `text` delta, and `message_stop` |
 | EP-02 | OpenAI `POST /v1/chat/completions` | `choices[0].message.content` is the assistant text |
 | EP-03 | `POST /v1/messages/count_tokens` | `200` with `input_tokens > 0` (lets clients time auto-compaction) |

@@ -405,6 +405,22 @@ describe("TUI: model picker", () => {
     expect(f).toMatch(/1M|128K/);
   });
 
+  it("selects long context then standard on the same mounted model picker", async () => {
+    const selected: string[] = [];
+    const loadModels = async () => ["gpt-6-astra", "gpt-6-astra:long_context"];
+    const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels}
+      modelLimits={{ "gpt-6-astra": 272000, "gpt-6-astra:long_context": 1000000 }}
+      onModelChange={(m) => selected.push(m)} />);
+    await tick(); stdin.write("/model"); await tick(); stdin.write("\r"); await tick(80);
+    expect(lastFrame() ?? "").toContain("272K");
+    expect(lastFrame() ?? "").toContain("1M");
+    stdin.write("\x1b[B"); await tick(); stdin.write("\r"); await tick(80);
+    expect(selected).toEqual(["gpt-6-astra:long_context"]);
+    stdin.write("/model"); await tick(); stdin.write("\r"); await tick(80);
+    stdin.write("\r"); await tick(80);
+    expect(selected).toEqual(["gpt-6-astra:long_context", "gpt-6-astra"]);
+  });
+
   it("shows mapping arrows but submits the native Claude id", async () => {
     const selected: string[] = [];
     const loadModels = async () => ["gpt-5.6-sol", "claude-opus-5"];

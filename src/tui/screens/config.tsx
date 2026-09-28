@@ -9,7 +9,6 @@ export interface ConfigInfo {
   supervisorPort: number;
   workerPort: number;
   dataDir: string;
-  contextTier?: "default" | "long_context";
 }
 
 export type ConfigAction = "model" | "setup-claude" | "setup-codex" | "setup-pi" | "network" | "back";
@@ -28,8 +27,8 @@ export function ConfigScreen({ info, model, clients, accessMode, onAction }: {
     <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text color={theme.accent} bold>configuration</Text>
       {row("chat model", model)}
-      {row("context", info.contextTier ?? "default")}
-      <Text color={theme.muted}>change tier: copilot-reverse context default|long_context; restart and re-run setup</Text>
+      {row("context", model.includes(":long_context") ? "long context" : "default")}
+      <Text color={theme.muted}>select a context budget in /model; no restart required</Text>
       {row("OpenAI", info.openai)}
       {row("Anthropic", info.anthropic)}
       {row("ports", `supervisor ${info.supervisorPort} · worker ${info.workerPort}`)}

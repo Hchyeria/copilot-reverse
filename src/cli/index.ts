@@ -16,7 +16,7 @@ import { makeOnChat } from "../tui/assistant/on-chat.js";
 import { readGitHubConnection, clearGitHubConnection, writeGitHubConnection } from "../shared/creds.js";
 import { writeWebIqKey, readWebIqKey, clearWebIqKey, readWebSearchMode, writeWebSearchMode, resolveWebSearchBackend } from "../shared/webiq-key.js";
 import { readClientSetup, writeClientSetup } from "../shared/client-setup.js";
-import { readContextTier, writeContextTier, readChatModel, writeChatModel, shouldShowChange, markChangeShown, readClaudeMapEnabled, readClaudeMapSettings, writeClaudeMapSettings, type ClaudeMapSettings } from "../shared/prefs.js";
+import { readChatModel, writeChatModel, shouldShowChange, markChangeShown, readClaudeMapEnabled, readClaudeMapSettings, writeClaudeMapSettings, type ClaudeMapSettings } from "../shared/prefs.js";
 import { readAccessMode, readAccessKey, setAccessMode as persistAccessMode, rotateAccessKey } from "../shared/network.js";
 import type { NetworkInfo } from "../tui/screens/network.js";
 import { CopilotAuthError } from "../providers/copilot/token.js";
@@ -33,6 +33,7 @@ import { applyCodexToml } from "../tui/setup/codex-toml.js";
 import type { SetupClient } from "../tui/setup/wizard.js";
 import { claudeCopilotReverseEnv } from "../tui/setup/clients.js";
 import { stripOneM } from "../core/model-canonical.js";
+import { LONG_CONTEXT_SUFFIX } from "../core/model-choices.js";
 import { updateModelBudgets } from "../tui/model-budgets.js";
 import { availableClaudeMappings, backendForClaudeAlias, modelMapDisplay, resolveClaudeModelMap } from "../core/claude-model-map.js";
 import { bestModelMatch } from "../core/fuzzy.js";
@@ -212,20 +213,32 @@ async function launchTui(): Promise<void> {
   // the next clean read, and a genuinely absent token surfaces as a 401 instead of a `token null` send.
   let tokenStore = createWorkerCopilotTokenStore(startupConnection, ghAuth);
   const loadModels = async () => {
-    const discovery = await fetchModelDiscovery(tokenStore, undefined, undefined, readContextTier(dataDir()));
+    const discovery = await fetchModelDiscovery(tokenStore);
     const { ids, limits } = discovery;
     latestModels = ids;
     latestModelsLive = discovery.live;
     updateModelBudgets(modelLimits, ids, limits, discovery.live, readClaudeMapEnabled(dataDir()), claudeMap);
     for (const key of Object.keys(modelLabels)) delete modelLabels[key];
+    for (const choice of discovery.choices) {
+      if (choice.contextWindow !== undefined) modelLimits[choice.id] = choice.contextWindow;
+      modelLabels[choice.id] = choice.name;
+    }
+    const choiceIds = discovery.choices.length ? discovery.choices.map((c) => c.id) : ids;
     // A fallback list only keeps ordinary selection usable; it is not positive evidence that a mapped
     // backend exists. Match the worker's invariant and never advertise compatibility aliases offline.
-    if (!readClaudeMapEnabled(dataDir()) || !discovery.live) return ids;
-    const out = [...ids];
+    if (!readClaudeMapEnabled(dataDir()) || !discovery.live) return choiceIds;
+    const out = [...choiceIds];
     const seen = new Set(out.map(stripOneM));
-    for (const { alias } of availableClaudeMappings(ids, claudeMap)) {
+    for (const { alias, backend } of availableClaudeMappings(ids, claudeMap)) {
       if (!seen.has(alias)) { out.push(alias); seen.add(alias); }
       modelLabels[alias] = modelMapDisplay(alias, ids, claudeMap);
+      const long = discovery.choices.find((c) => c.upstreamId === backend && c.id.endsWith(LONG_CONTEXT_SUFFIX));
+      const longAlias = `${alias}${LONG_CONTEXT_SUFFIX}`;
+      if (long && !seen.has(longAlias)) {
+        out.push(longAlias); seen.add(longAlias);
+        modelLabels[longAlias] = `${modelLabels[alias]} · long context`;
+        if (long.contextWindow !== undefined) modelLimits[longAlias] = long.contextWindow;
+      }
     }
     return out;
   };
@@ -262,7 +275,7 @@ async function launchTui(): Promise<void> {
   const applyClient = (clientKind: SetupClient, scope: Scope, model: string) => {
     if (clientKind === "claude") {
       const backend = readClaudeMapEnabled(dataDir()) && latestModelsLive ? backendForClaudeAlias(model, latestModels, claudeMap) : undefined;
-      const r = applyClaude(scope, claudeCopilotReverseEnv(anthropicBase, "copilot-reverse-local", model, modelLimits[backend ?? model]));
+      const r = applyClaude(scope, claudeCopilotReverseEnv(anthropicBase, "copilot-reverse-local", model, modelLimits[model] ?? modelLimits[backend ?? model]));
       writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), claude: true });
       return r;
     }
@@ -276,7 +289,7 @@ async function launchTui(): Promise<void> {
   // pi setup: the picker needs each model's FULL upstream definition (window, output cap, vision,
   // reasoning levels), not just an id, because a models.json entry must state all of it up front.
   const setupPi = {
-    loadCatalog: async (): Promise<CopilotModelInfo[]> => fetchCopilotModelCatalog(tokenStore, undefined, undefined, readContextTier(dataDir())),
+    loadCatalog: async (): Promise<CopilotModelInfo[]> => fetchCopilotModelCatalog(tokenStore),
     apply: async (models: CopilotModelInfo[]) => {
       const r = applyPi(models, endpoint);
       writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), pi: true });
@@ -371,7 +384,6 @@ async function launchTui(): Promise<void> {
         supervisorPort: cfg.supervisorPort,
         workerPort: cfg.workerPort,
         dataDir: dataDir(),
-        contextTier: readContextTier(dataDir()),
       },
       onModelChange: (m: string) => writeChatModel(dataDir(), m),
       pickModelOnStart: !persistedModel,
@@ -442,12 +454,10 @@ async function launchTui(): Promise<void> {
 const program = new Command();
 program.name("copilot-reverse").description("copilot-reverse: interactive Copilot proxy").version(APP_VERSION);
 program.command("context [tier]")
-  .description("Show or set the client context budget: default or long_context (opt-in)")
+  .description("Explain per-model context selection (global tiers have been replaced)")
   .action((tier?: string) => {
-    if (tier === undefined) { console.log(readContextTier(dataDir())); return; }
-    if (tier !== "default" && tier !== "long_context") throw new Error("context tier must be default or long_context");
-    writeContextTier(dataDir(), tier);
-    console.log(`Context tier: ${tier}. Restart copilot-reverse and re-run client setup to update existing client configs. No upstream model id or header is changed.`);
+    if (tier !== undefined) throw new Error("Global context tiers were replaced: select a default or :long_context model in /model. No restart required.");
+    console.log("Select a default or :long_context entry in /model. Bare model IDs use default budgets. No restart required; re-run pi setup once to populate both entries.");
   });
 program.command("login")
   .description("Login with GitHub.com or GHE.com")

@@ -19,7 +19,7 @@ export function mountOpenAI(app: Express, router: Router, onMetric: MetricSink):
   // Model discovery — OpenAI list shape. Clients (LiteLLM-style gateways, "test connection" probes)
   // GET this before chatting; without it they 404 and refuse to connect.
   app.get("/openai/models", (_req, res) => {
-    res.json({ object: "list", data: router.listModels().map((id) => ({ id, object: "model", owned_by: "copilot-reverse" })) });
+    res.json({ object: "list", data: router.listModels().map((id) => ({ id, object: "model", owned_by: "copilot-reverse", context_window: router.modelLimit(id) })) });
   });
 
   app.post("/openai/chat/completions", async (req, res) => {

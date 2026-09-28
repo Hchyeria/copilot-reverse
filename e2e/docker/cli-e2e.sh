@@ -29,10 +29,31 @@ check() { # check <name> <test-expr> <detail-for-report>
 # Isolated HOME means this case never rewrites the mounted credentials/client configuration.
 CONTEXT_HOME=$(mktemp -d)
 context_cli() { HOME="$CONTEXT_HOME" USERPROFILE="$CONTEXT_HOME" node dist/cli/index.js context "$@"; }
-check "context CLI defaults to default" '[ "$(context_cli)" = default ]' "fresh isolated HOME"
-check "context CLI opts into long_context" 'context_cli long_context >/dev/null && [ "$(context_cli)" = long_context ]' "persisted opt-in"
-check "context CLI rejects invalid tier without overwriting" '! context_cli 1m >/dev/null 2>&1 && [ "$(context_cli)" = long_context ]' "invalid 1m rejected"
-check "context CLI returns to default" 'context_cli default >/dev/null && [ "$(context_cli)" = default ]' "persisted default"
+check "context CLI explains model selection" 'context_cli | grep -q "No restart required"' "fresh isolated HOME"
+check "context CLI rejects retired global long tier" '! context_cli long_context >/dev/null 2>&1' "select :long_context in model list instead"
+check "context CLI rejects invalid tier" '! context_cli 1m >/dev/null 2>&1' "invalid 1m rejected"
+check "context CLI leaves preferences unchanged" '[ ! -e "$CONTEXT_HOME/.copilot-reverse/prefs.json" ]' "no global preference written"
+# Use the actual pi registry/model-list flow, not synthetic HTTP. No inference or credentials.
+if command -v pi >/dev/null 2>&1; then
+  HOME="$CONTEXT_HOME" USERPROFILE="$CONTEXT_HOME" node --input-type=module <<'NODE'
+const { fetchCopilotModelCatalog } = await import("./dist/providers/copilot/models.js");
+const { applyPi } = await import("./dist/tui/setup/pi-config.js");
+const fixture = { id: "gpt-6-astra", capabilities: { limits: { max_context_window_tokens: 1050000 } }, billing: { token_prices: { default: { max_prompt_tokens: 272000 }, long_context: { max_prompt_tokens: 1000000 } } } };
+const models = await fetchCopilotModelCatalog("fixture", async () => new Response(JSON.stringify({ data: [fixture] })));
+applyPi(models, { host: "127.0.0.1", port: 7891, apiKey: "fixture" });
+NODE
+  PI_LIST=$(HOME="$CONTEXT_HOME" PI_CODING_AGENT_DIR="$CONTEXT_HOME/.pi/agent" pi --no-extensions --no-skills --no-prompt-templates --list-models gpt-6-astra 2>&1)
+  check "pi lists both context choices" 'echo "$PI_LIST" | grep -q "gpt-6-astra:long_context" && echo "$PI_LIST" | grep -q "272" && echo "$PI_LIST" | grep -q "1M"' "real pi model registry reads generated per-model budgets"
+  # No pricing tier: ensure no phantom long-context identity appears in the real client list.
+  HOME="$CONTEXT_HOME" node --input-type=module <<'NODE'
+const { applyPi } = await import("./dist/tui/setup/pi-config.js");
+applyPi([{ id: "gpt-4o", name: "gpt-4o", contextWindow: 128000, maxOutputTokens: 16384, vision: false, reasoningEfforts: [] }], { host: "127.0.0.1", port: 7891, apiKey: "fixture" });
+NODE
+  PI_LIST=$(HOME="$CONTEXT_HOME" PI_CODING_AGENT_DIR="$CONTEXT_HOME/.pi/agent" pi --no-extensions --no-skills --no-prompt-templates --list-models gpt-4o 2>&1)
+  check "pi untiered model has no long choice" 'echo "$PI_LIST" | grep -q "copilot-openai" && ! echo "$PI_LIST" | grep -q "gpt-4o:long_context"' "real pi model registry edge case"
+else
+  record "pi per-model context selection" "SKIP" "optional pi executable not installed"
+fi
 rm -rf "$CONTEXT_HOME"
 
 # --- preconditions ------------------------------------------------------------------------------

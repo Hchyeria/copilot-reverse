@@ -112,8 +112,8 @@ you don't trade fidelity for a free backend.
   `x-copilot-reverse-effort` header.)
 - **🪟 Default and extended context budgets.** Tiered models default to Copilot's standard prompt
   budget (e.g. Astra 272K), rather than automatically opting into long-context pricing. Select
-  `long_context` explicitly for the larger budget; model pickers, generated client configs and the
-  built-in assistant use the selected tier. Untiered models keep their advertised window.
+  the separate `:long_context` model-list entry for the larger budget; switch back to the bare model
+  for standard context, with no service restart. Generated pi configs include both entries. Untiered models keep their advertised window.
 - **🔀 Customizable Claude names for GPT-only accounts.** Run `/claude-map` to enable the feature and
   choose a live GPT backend for each current Claude identity. Defaults are Fable 5.1→gpt-6-astra,
   Opus 5→gpt-5.6-sol, Sonnet 5→gpt-5.6-sol-fast, and Haiku 4.5→gpt-5.6-luna. The editor lists every
@@ -203,17 +203,25 @@ model claude-opus-4.8  ·  daemon ready  ·  claude u:✓ p:○  codex u:○ p:�
 
 **Choose default or extended context**
 
-```sh
-copilot-reverse context               # show the saved tier; fresh installs use default
-copilot-reverse context default       # standard budget (Astra: 272K when advertised)
-copilot-reverse context long_context  # opt into the model's extended budget (~1M class)
+Choose either entry in `/model` (GPT and Claude are both supported):
+
+```text
+gpt-6-astra                default · 272K
+gpt-6-astra:long_context   long context · 1M
 ```
 
-The preference is saved in `~/.copilot-reverse/prefs.json`. Restart copilot-reverse (including
-any already-running daemon), then re-run `/setup-pi`, `/setup-codex` or `/setup-claude` and restart
-that client. Existing client configuration files are **not automatically rewritten**. `/config`
-shows the selected tier. This is a global preference across tiered models, not a model-name suffix
-or an upstream activation header.
+Bare model IDs always use the standard budget. Switch entries for the next turn; no proxy restart
+is required. `/setup-pi` generates both entries with independent `contextWindow` values, so pi's
+model picker switches budgets together with the model. Existing pi installations must re-run setup
+and reload the client once to import the new entries; host config files are **not automatically
+rewritten**. TUI `/model` saves the selected identity. Worker OpenAI/Anthropic lists expose both
+entries and `context_window` metadata. Clients must honor their own per-model budget configuration;
+merely changing a model ID cannot override a third-party client's global compaction setting.
+Claude/Codex setup writes the budget for the chosen entry.
+
+`:long_context` is a **local alias**, stripped before inference; both choices call the same Copilot
+model. There is no upstream activation header. The earlier global `context default|long_context`
+command is retired and old global preferences do not override model choices.
 
 Budgets come from `/models` → `billing.token_prices.default/long_context.max_prompt_tokens`
 (or legacy `context_max`), bounded by the advertised window. Missing tier metadata retains the

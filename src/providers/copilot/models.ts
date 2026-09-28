@@ -1,3 +1,4 @@
+import { modelChoices, type ModelChoice } from "../../core/model-choices.js";
 import { contextBudget, type ContextMetadata, type ContextTier } from "../../core/context-tier.js";
 import { CopilotEndpointContractError } from "./token.js";
 import { copilotUrl, DEFAULT_COPILOT_INFERENCE_ORIGIN, readCopilotSession, type CopilotSessionSource } from "./session.js";
@@ -135,7 +136,7 @@ const DEFAULT_MAX_OUTPUT = 16_384;
 // (capabilities.type !== "chat") so they can never reach a picker or a generated config. Returns []
 // on failure/timeout — same graceful-degradation contract as its siblings, letting a caller say "the
 // model list is unreachable" instead of writing a config built from guesses.
-export async function fetchCopilotModelCatalog(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, tier: ContextTier = "default"): Promise<CopilotModelInfo[]> {
+export async function fetchCopilotModelCatalog(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CopilotModelInfo[]> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return [];
   const out: CopilotModelInfo[] = [];
@@ -146,20 +147,25 @@ export async function fetchCopilotModelCatalog(token: TokenOrSessionSource, fetc
     if (m.capabilities?.type && m.capabilities.type !== "chat") continue;
     seen.add(m.id);
     const lim = m.capabilities?.limits;
-    out.push({
-      id: m.id,
-      name: m.name || m.id,
-      contextWindow: contextBudget(m, tier) ?? DEFAULT_CONTEXT_WINDOW,
-      maxOutputTokens: lim?.max_output_tokens ?? DEFAULT_MAX_OUTPUT,
-      vision: m.capabilities?.supports?.vision === true,
-      reasoningEfforts: m.capabilities?.supports?.reasoning_effort ?? [],
-    });
+    for (const choice of modelChoices({ ...m, id: m.id })) {
+      // Real upstream identities win a collision with a local suffix.
+      if (choice.id !== m.id && data.some((entry) => entry.id === choice.id)) continue;
+      out.push({
+        id: choice.id,
+        name: choice.name,
+        contextWindow: choice.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        maxOutputTokens: lim?.max_output_tokens ?? DEFAULT_MAX_OUTPUT,
+        vision: m.capabilities?.supports?.vision === true,
+        reasoningEfforts: m.capabilities?.supports?.reasoning_effort ?? [],
+      });
+    }
   }
   return out;
 }
 
 export interface CopilotModelDiscovery {
   ids: string[];
+  choices: ModelChoice[];
   // False means ids came from FALLBACK_MODELS after discovery failed. Compatibility aliases require
   // positive live evidence, so the Router may list these ids but must not synthesize mappings from them.
   live: boolean;
@@ -174,7 +180,7 @@ export interface CopilotModelDiscovery {
 // this guarantees aliases are filtered and badged from one coherent snapshot of the account's model list.
 export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, tier: ContextTier = "default"): Promise<CopilotModelDiscovery> {
   const data = await getModels(token, fetchFn, timeoutMs);
-  if (!data) return { ids: FALLBACK_MODELS, live: false, endpoints: {}, reasoning: new Set(), reasoningEfforts: {}, oneM: new Set(), limits: {} };
+  if (!data) return { ids: FALLBACK_MODELS, choices: [], live: false, endpoints: {}, reasoning: new Set(), reasoningEfforts: {}, oneM: new Set(), limits: {} };
   const ids = [...new Set(data.map((m) => m.id).filter((id): id is string => Boolean(id)))];
   const endpoints: Record<string, string[]> = {};
   const reasoning = new Set<string>();
@@ -194,5 +200,8 @@ export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: 
       if (limit > 800_000) oneM.add(m.id);
     }
   }
-  return { ids: ids.length ? ids : FALLBACK_MODELS, live: ids.length > 0, endpoints, reasoning, reasoningEfforts, oneM, limits };
+  const choices = data.flatMap((m) => m.id ? modelChoices({ ...m, id: m.id }) : [])
+    .filter((c) => c.id === c.upstreamId || !ids.includes(c.id))
+    .filter((c, index, all) => all.findIndex((other) => other.id === c.id) === index);
+  return { ids: ids.length ? ids : FALLBACK_MODELS, choices, live: ids.length > 0, endpoints, reasoning, reasoningEfforts, oneM, limits };
 }

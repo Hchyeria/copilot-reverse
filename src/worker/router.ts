@@ -1,3 +1,4 @@
+import { anthropicChoice, findModelChoice, LONG_CONTEXT_SUFFIX, type ModelChoice } from "../core/model-choices.js";
 import type { ProviderAdapter } from "../providers/types.js";
 import { bestModelMatch } from "../core/fuzzy.js";
 import { FALLBACK_MODELS } from "../providers/copilot/models.js";
@@ -12,6 +13,8 @@ export interface RouterOptions {
 // M1: single provider. Model name is remapped to the provider's actual id.
 export class Router {
   private available: string[] = [];
+  private choices: ModelChoice[] = [];
+  setModelChoices(choices: ModelChoice[]): void { this.choices = choices.map((c) => ({ ...c })); }
   // Undefined until discovery resolves; an explicitly empty set means the selected tier has no 1M models.
   private oneM: Set<string> | undefined;
   private limits: Record<string, number> = {};
@@ -32,8 +35,8 @@ export class Router {
   is1M(dashed: string): boolean {
     return this.oneM ? this.oneM.has(dashed) : DEFAULT_ONE_M_MODELS.has(dashed);
   }
-  // Real model ids only. OpenAI/Codex discovery must never see synthesized Claude aliases.
-  listModels(): string[] { return this.available.length ? this.available : FALLBACK_MODELS; }
+  // Real models and their local budget choices; never synthesized Claude compatibility aliases.
+  listModels(): string[] { return this.choices.length ? this.choices.map((c) => c.id) : this.available.length ? this.available : FALLBACK_MODELS; }
 
   private realClaudeModel(alias: string): string | undefined {
     return this.available.find((model) => model.replace(/\./g, "-") === alias);
@@ -43,17 +46,30 @@ export class Router {
   // append only aliases whose exact GPT targets were observed in LIVE discovery. A real Copilot Claude id
   // always wins a name collision: compatibility must never replace or reroute a genuine model.
   listAnthropicModels(): CanonicalModel[] {
-    const real = this.listModels().map((id) => toCanonical(id, (d) => this.is1M(d)));
+    const real = this.choices.length ? this.choices.map(anthropicChoice) : this.listModels().map((id) => toCanonical(id, (d) => this.is1M(d)));
     if (!this.opts.claudeMapEnabled || !this.liveDiscovery) return real;
     for (const { alias, backend } of availableClaudeMappings(this.available, this.claudeModelMap)) {
       if (this.realClaudeModel(alias)) continue;
-      const limit = this.limits[backend];
-      real.push(toCanonical(alias, () => limit !== undefined && limit > 800_000));
+      const choices = this.choices.filter((c) => c.upstreamId === backend);
+      if (choices.length) {
+        for (const c of choices) real.push(anthropicChoice({ ...c, upstreamId: alias,
+          id: c.id === backend ? alias : `${alias}${LONG_CONTEXT_SUFFIX}`, name: `${alias} · ${c.name}` }));
+      } else {
+        const limit = this.limits[backend];
+        real.push(toCanonical(alias, () => limit !== undefined && limit > 800_000));
+      }
     }
     return real;
   }
 
   modelLimit(model: string): number | undefined {
+    const choice = this.choiceFor(model);
+    if (choice) {
+      const backend = this.resolveModel(model);
+      if (backend === choice.upstreamId) return choice.contextWindow;
+      const variant = choice.id !== choice.upstreamId ? LONG_CONTEXT_SUFFIX : "";
+      return findModelChoice(this.choices, `${backend}${variant}`)?.contextWindow ?? this.limits[backend];
+    }
     const alias = stripOneM(model);
     const real = this.realClaudeModel(alias);
     const backend = !real && this.opts.claudeMapEnabled && this.liveDiscovery
@@ -62,7 +78,33 @@ export class Router {
     return this.limits[backend ?? real ?? alias];
   }
 
+  private choiceFor(requested: string): ModelChoice | undefined {
+    const direct = findModelChoice(this.choices, requested);
+    if (direct) return direct;
+    const bare = stripOneM(requested);
+    const long = bare.endsWith(LONG_CONTEXT_SUFFIX);
+    const alias = long ? bare.slice(0, -LONG_CONTEXT_SUFFIX.length) : bare;
+    if (this.opts.claudeMapEnabled && this.liveDiscovery && !this.realClaudeModel(alias)) {
+      const backend = backendForClaudeAlias(alias, this.available, this.claudeModelMap);
+      if (backend) return findModelChoice(this.choices, `${backend}${long ? LONG_CONTEXT_SUFFIX : ""}`);
+    }
+    return undefined;
+  }
+
   resolveModel(requested: string): string {
+    const choice = this.choiceFor(requested);
+    if (choice) return this.modelMap[stripOneM(requested)] ?? this.modelMap[choice.upstreamId] ?? choice.upstreamId;
+    // Previously generated client configs must keep working if startup discovery is unavailable.
+    // Decoding a local identity does not advertise a budget/capability; the client retains its budget.
+    // Do not fuzzy-match an unadvertised variant to an unrelated model or leak our suffix upstream.
+    const bare = stripOneM(requested);
+    if (bare.endsWith(LONG_CONTEXT_SUFFIX)) {
+      const base = bare.slice(0, -LONG_CONTEXT_SUFFIX.length);
+      const real = this.available.find((id) => id === base) ?? this.realClaudeModel(base);
+      const backend = this.opts.claudeMapEnabled && this.liveDiscovery && !real
+        ? backendForClaudeAlias(base, this.available, this.claudeModelMap) : undefined;
+      return this.modelMap[bare] ?? this.modelMap[base] ?? backend ?? real ?? base;
+    }
     // Claude Code appends [1m] to signal its 1M context window; Copilot doesn't know that id, so
     // strip it back to the canonical model before mapping/forwarding.
     requested = stripOneM(requested);

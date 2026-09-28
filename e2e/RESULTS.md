@@ -3,6 +3,17 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-29 (per-model context choices; `feat/context-window-tiers`)** — replaces the
+  global-only implementation below. `npm test`: **97 files / 1,022 tests PASS**;
+  `npm run build` and `git diff --check`: **PASS**. Hermetic HTTP context gate:
+  **20 assertions PASS**, including saved pi aliases with unavailable discovery,
+  alternating default/long/default on one worker and
+  upstream-ID preservation across chat, Responses and Anthropic. Real CLI gate: **6 PASS**,
+  including actual pi model-list loading of both 272K/1M definitions and untiered edge case.
+  CLI report: `/tmp/model-choices-cli-report.md`. No host configs or credentials changed.
+  Live Copilot CLI inference **SKIP** (no credentials mounted in the test environment);
+  full Docker matrix **NOT RUN** (Docker unavailable). **Live gate still required before merge.**
+
 - **2026-09-28 (context budget tiers; `feat/context-window-tiers`)** — `npm test`:
   **96 files / 1,015 tests PASS**; `npm run build` **PASS**; `git diff --check` **PASS**.
   `node e2e/docker/http-e2e.mjs --context-only`: **12 hermetic assertions PASS** (selected

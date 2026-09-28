@@ -99,6 +99,38 @@ async function contextTierChecks() {
       check(`${tier}: model resolves to unchanged upstream id`, router.resolveModel(listed[0].id) === tiered.id);
     } finally { await new Promise((resolve) => server.close(resolve)); }
   }
+  // One running worker exposes both budgets and accepts alternating choices without restart.
+  {
+    const astra = { ...tiered, id: "gpt-6-astra" };
+    const discovery = await fetchModelDiscovery("fixture", async () => new Response(JSON.stringify({ data: [astra, tiered] })));
+    const received = [];
+    const provider = { name: "fixture", async complete(req) {
+      received.push(req.model);
+      return { id: "fixture", model: req.model, content: [{ type: "text", text: "CHOICE_OK" }], stopReason: "end_turn" };
+    }, async *stream(req) { received.push(req.model); yield { kind: "text", delta: "CHOICE_OK" }; yield { done: true, finishReason: "stop" }; } };
+    const router = new Router([provider], {}, { claudeMapEnabled: true });
+    router.setAvailableModels(discovery.ids); router.setModelChoices(discovery.choices);
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    const base = `http://${HOST}:${server.address().port}`;
+    try {
+      const models = (await jget(`${base}/openai/models`)).j.data;
+      check("choices: GPT lists default and long budgets", models.find((m) => m.id === astra.id)?.context_window === 272_000 && models.find((m) => m.id === `${astra.id}:long_context`)?.context_window === 1_000_000);
+      const anthropic = (await jget(`${base}/anthropic/v1/models`)).j.data;
+      check("choices: Claude lists both budgets", anthropic.some((m) => m.id === "claude-opus-4-8") && anthropic.some((m) => m.id === "claude-opus-4-8:long_context[1m]"));
+      for (const suffix of ["", ":long_context", ""]) {
+        const result = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: `${astra.id}${suffix}`, messages: [{ role: "user", content: "hi" }], stream: true }));
+        check(`choices: GPT ${suffix || "default"} streams through same worker`, result.s === 200 && result.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
+      }
+      const response = await jpost(`${base}/openai/responses`, JSON.stringify({ model: `${astra.id}:long_context`, input: "hi", stream: true }));
+      check("choices: Responses strips local suffix", response.s === 200 && response.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
+      const claude = await jpost(`${base}/anthropic/v1/messages`, JSON.stringify({ model: "claude-opus-4-8:long_context[1m]", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
+      check("choices: Anthropic strips local suffix", claude.s === 200 && claude.t.includes("CHOICE_OK") && received.at(-1) === tiered.id);
+      router.setModelChoices([]); router.setAvailableModels([], false);
+      const offline = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: `${astra.id}:long_context`, messages: [{ role: "user", content: "hi" }], stream: true }));
+      check("choices: saved pi alias survives unavailable discovery", offline.s === 200 && received.at(-1) === astra.id);
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
   const { updateModelBudgets } = await import("../../dist/tui/model-budgets.js");
   const { resolveClaudeModelMap } = await import("../../dist/core/claude-model-map.js");
   const { claudeCopilotReverseEnv } = await import("../../dist/tui/setup/clients.js");

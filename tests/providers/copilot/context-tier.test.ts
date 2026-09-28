@@ -21,13 +21,13 @@ const fetchModels = () => vi.fn(async () => new Response(JSON.stringify({ data: 
 describe("context tier selection", () => {
   it.each([["default", 272_000], ["long_context", 1_000_000]] as const)("propagates %s through discovery, setup and routing", async (tier, budget) => {
     const d = await fetchModelDiscovery("test", fetchModels(), undefined, tier);
-    const catalog = await fetchCopilotModelCatalog("test", fetchModels(), undefined, tier);
+    const catalog = await fetchCopilotModelCatalog("test", fetchModels());
     expect(d.limits[model.id]).toBe(budget);
     expect(d.oneM.has(model.id)).toBe(tier === "long_context");
     expect(await fetchModelLimits("test", fetchModels(), undefined, tier)).toEqual(d.limits);
     expect(await fetchModelOneMSupport("test", fetchModels(), undefined, tier)).toEqual(d.oneM);
     const pi = buildPiConfig(catalog, { host: "127.0.0.1", port: 7891, apiKey: "dummy" });
-    expect(pi[PI_OPENAI_PROVIDER].models[0]).toMatchObject({ id: model.id, contextWindow: budget, maxTokens: 128_000 });
+    expect(pi[PI_OPENAI_PROVIDER].models[tier === "default" ? 0 : 1]).toMatchObject({ id: tier === "default" ? model.id : `${model.id}:long_context`, contextWindow: budget, maxTokens: 128_000 });
     const router = new Router([], {});
     router.setAvailableModels(d.ids);
     router.setOneMModels(d.oneM);
