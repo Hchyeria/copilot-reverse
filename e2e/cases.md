@@ -11,7 +11,7 @@ fixtures in [`helpers.ts`](./helpers.ts).
 
 | ID | Scenario | Expected result |
 |----|----------|-----------------|
-| CTX-01 | `node e2e/docker/http-e2e.mjs --context-only`: fixture discovery → real HTTP model picker | default 272K has no 1M badge, long tier 1M has badge, both resolve unchanged upstream ID; no live quota |
+| CTX-01 | `node e2e/docker/http-e2e.mjs --context-only`: fixture discovery → real HTTP model picker | default 272K has no 1M badge, long tier 1M has badge, both resolve unchanged upstream ID; default-only, missing limits and failed discovery never infer 1M in setup/HTTP picker; no live quota |
 | CTX-02 | `e2e/docker/cli-e2e.sh`: actual `copilot-reverse context` CLI with isolated HOME | fresh default → persisted long_context → invalid input rejected without overwriting → default restored; missing live credentials recorded as SKIP |
 | EP-01 | Anthropic `POST /v1/messages` with `stream: true` | SSE contains `message_start`, a `text` delta, and `message_stop` |
 | EP-02 | OpenAI `POST /v1/chat/completions` | `choices[0].message.content` is the assistant text |

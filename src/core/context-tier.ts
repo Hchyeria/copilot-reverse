@@ -19,10 +19,11 @@ export function contextBudget(model: ContextMetadata, tier: ContextTier = "defau
   const limits = model.capabilities?.limits;
   const full = positive(limits?.max_context_window_tokens) ?? positive(limits?.max_prompt_tokens);
   const prices = model.billing?.token_prices;
-  if (!prices?.long_context) return full;
-  const selected = prices[tier];
+  // A default budget is authoritative even if the account has no long-tier entry.
+  const selected = prices?.[tier] ?? prices?.default;
   const budget = positive(selected?.max_prompt_tokens) ?? positive(selected?.context_max);
   if (budget !== undefined) return full === undefined ? budget : Math.min(budget, full);
+  if (!prices?.long_context) return full;
   // With incomplete default-tier metadata prefer the advertised input budget over the full window.
   return tier === "default" ? positive(limits?.max_prompt_tokens) ?? full : full;
 }

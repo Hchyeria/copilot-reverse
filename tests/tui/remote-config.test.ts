@@ -15,17 +15,17 @@ describe("remoteClaudeBlock", () => {
     const parsed = JSON.parse(text);
     expect(parsed.env.ANTHROPIC_BASE_URL).toBe("http://172.22.80.1:7891/anthropic");
     expect(parsed.env.ANTHROPIC_API_KEY).toBe(key);          // key in the AUTH slot, not the URL
-    expect(parsed.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]");
+    expect(parsed.env.ANTHROPIC_MODEL).toBe("claude-opus-4-8");
   });
 
-  it("canonicalizes a dotted/dashed claude model to the [1m] picker id (matches local setup)", () => {
-    const b = remoteClaudeBlock({ lanUrl, key, claudeModel: "claude-opus-4.8" });
+  it("canonicalizes a known long-context model to the [1m] picker id (matches local setup)", () => {
+    const b = remoteClaudeBlock({ lanUrl, key, claudeModel: "claude-opus-4.8", claudeContextWindow: 1_000_000 });
     expect(JSON.parse(b.lines.join("\n")).env.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]");
   });
 
   it("falls back to a sensible default model when none is configured", () => {
     const b = remoteClaudeBlock({ lanUrl, key });
-    expect(JSON.parse(b.lines.join("\n")).env.ANTHROPIC_MODEL).toBe("claude-opus-4-8[1m]");
+    expect(JSON.parse(b.lines.join("\n")).env.ANTHROPIC_MODEL).toBe("claude-opus-4-8");
   });
 
   it("never leaks the key into a base-url line", () => {
@@ -40,9 +40,9 @@ describe("remoteClaudeBlock", () => {
     expect(JSON.parse(b.lines.join("\n")).env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("1000000");
   });
 
-  it("omits the auto-compact window when unknown (same as a local run before limits load)", () => {
+  it("uses a conservative auto-compact window when unknown (matches local setup)", () => {
     const b = remoteClaudeBlock({ lanUrl, key, claudeModel: "claude-opus-4-8[1m]" });
-    expect(JSON.parse(b.lines.join("\n")).env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+    expect(JSON.parse(b.lines.join("\n")).env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("110000");
   });
 });
 

@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { contextBudget } from "../../../src/core/context-tier.js";
 import { fetchModelDiscovery, fetchCopilotModelCatalog, fetchModelLimits, fetchModelOneMSupport } from "../../../src/providers/copilot/models.js";
 import { buildPiConfig, PI_OPENAI_PROVIDER } from "../../../src/tui/setup/pi-config.js";
+import { updateModelBudgets } from "../../../src/tui/model-budgets.js";
+import { resolveClaudeModelMap } from "../../../src/core/claude-model-map.js";
 import { Router } from "../../../src/worker/router.js";
 import { claudeCopilotReverseEnv } from "../../../src/tui/setup/clients.js";
 import { applyCodexToml } from "../../../src/tui/setup/codex-toml.js";
@@ -40,6 +42,33 @@ describe("context tier selection", () => {
       const config = applyCodexToml({ home, baseUrl: "http://localhost/openai", model: model.id, contextWindow: budget });
       expect(readFileSync(config.path, "utf8")).toContain(`model_context_window = ${budget}`);
     } finally { rmSync(home, { recursive: true, force: true }); }
+  });
+  it.each([false, true])("preserves real Claude budgets in the TUI snapshot (map enabled: %s)", (enabled) => {
+    const target = { stale: 1_000_000 } as Record<string, number>;
+    const limits = { "claude-sonnet-5": 272_000, "gpt-5.6-sol-fast": 1_000_000 };
+    updateModelBudgets(target, Object.keys(limits), limits, true, enabled, resolveClaudeModelMap());
+    expect(target).toEqual(limits);
+    const env = claudeCopilotReverseEnv("http://localhost", "fixture", "claude-sonnet-5", target["claude-sonnet-5"]);
+    expect(env.ANTHROPIC_MODEL).toBe("claude-sonnet-5");
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("272000");
+  });
+  it("honors default-only metadata in both current and legacy schemas", () => {
+    for (const entry of [{ max_prompt_tokens: 272_000 }, { context_max: 272_000 }]) {
+      const m = { ...model, billing: { token_prices: { default: entry } } };
+      expect(contextBudget(m)).toBe(272_000);
+      expect(contextBudget(m, "long_context")).toBe(272_000);
+    }
+  });
+  it("does not badge mapped aliases without a known backend budget", () => {
+    const router = new Router([], {}, { claudeMapEnabled: true });
+    router.setAvailableModels(["gpt-6-astra"]);
+    router.setOneMModels([]);
+    expect(router.listAnthropicModels().find((m) => m.id.startsWith("claude-fable"))?.id).toBe("claude-fable-5-1");
+  });
+  it("overwrites unknown setup budgets conservatively instead of inheriting an old 1M setting", () => {
+    const env = claudeCopilotReverseEnv("http://localhost", "fixture", "claude-sonnet-5[1m]");
+    expect(env.ANTHROPIC_MODEL).toBe("claude-sonnet-5");
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("110000");
   });
   it("defaults to the smaller tier without an explicit selection", async () => {
     expect((await fetchModelDiscovery("test", fetchModels())).limits[model.id]).toBe(272_000);

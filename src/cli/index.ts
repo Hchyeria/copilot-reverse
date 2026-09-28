@@ -33,7 +33,8 @@ import { applyCodexToml } from "../tui/setup/codex-toml.js";
 import type { SetupClient } from "../tui/setup/wizard.js";
 import { claudeCopilotReverseEnv } from "../tui/setup/clients.js";
 import { stripOneM } from "../core/model-canonical.js";
-import { CLAUDE_MODEL_ALIASES, availableClaudeMappings, backendForClaudeAlias, modelMapDisplay, resolveClaudeModelMap } from "../core/claude-model-map.js";
+import { updateModelBudgets } from "../tui/model-budgets.js";
+import { availableClaudeMappings, backendForClaudeAlias, modelMapDisplay, resolveClaudeModelMap } from "../core/claude-model-map.js";
 import { bestModelMatch } from "../core/fuzzy.js";
 import { dataDir } from "../shared/paths.js";
 import { defaultConfig } from "../shared/config.js";
@@ -215,19 +216,16 @@ async function launchTui(): Promise<void> {
     const { ids, limits } = discovery;
     latestModels = ids;
     latestModelsLive = discovery.live;
-    for (const key of Object.keys(modelLimits)) delete modelLimits[key];
-    Object.assign(modelLimits, limits); // selected-tier budgets for setup and auto-compaction
+    updateModelBudgets(modelLimits, ids, limits, discovery.live, readClaudeMapEnabled(dataDir()), claudeMap);
     for (const key of Object.keys(modelLabels)) delete modelLabels[key];
-    for (const alias of CLAUDE_MODEL_ALIASES) delete modelLimits[alias];
     // A fallback list only keeps ordinary selection usable; it is not positive evidence that a mapped
     // backend exists. Match the worker's invariant and never advertise compatibility aliases offline.
     if (!readClaudeMapEnabled(dataDir()) || !discovery.live) return ids;
     const out = [...ids];
     const seen = new Set(out.map(stripOneM));
-    for (const { alias, backend } of availableClaudeMappings(ids, claudeMap)) {
+    for (const { alias } of availableClaudeMappings(ids, claudeMap)) {
       if (!seen.has(alias)) { out.push(alias); seen.add(alias); }
       modelLabels[alias] = modelMapDisplay(alias, ids, claudeMap);
-      if (limits[backend] !== undefined) modelLimits[alias] = limits[backend];
     }
     return out;
   };

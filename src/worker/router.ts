@@ -48,7 +48,7 @@ export class Router {
     for (const { alias, backend } of availableClaudeMappings(this.available, this.claudeModelMap)) {
       if (this.realClaudeModel(alias)) continue;
       const limit = this.limits[backend];
-      real.push(toCanonical(alias, limit === undefined ? undefined : () => limit > 800_000));
+      real.push(toCanonical(alias, () => limit !== undefined && limit > 800_000));
     }
     return real;
   }

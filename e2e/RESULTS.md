@@ -4,9 +4,11 @@ Latest run of the end-to-end suite. Regenerate after every code change with `npm
 and update this file (paste the summary).
 
 - **2026-09-28 (context budget tiers; `feat/context-window-tiers`)** — `npm test`:
-  **96 files / 1,010 tests PASS**; `npm run build` **PASS**; `git diff --check` **PASS**.
-  `node e2e/docker/http-e2e.mjs --context-only`: **6 hermetic assertions PASS** (selected
-  default/long budget, HTTP picker badge, unchanged upstream model id). Real project CLI flow
+  **96 files / 1,015 tests PASS**; `npm run build` **PASS**; `git diff --check` **PASS**.
+  `node e2e/docker/http-e2e.mjs --context-only`: **12 hermetic assertions PASS** (selected
+  default/long budget, HTTP picker badge, unchanged upstream model id; default-only metadata,
+  missing limits, and failed discovery never infer 1M). Review regressions also cover real Claude
+  identities colliding with compatibility aliases and conservative setup overwrites. Real project CLI flow
   via `REPORT_PATH=/tmp/context-tier-cli-report.md bash e2e/docker/cli-e2e.sh`: **4 PASS**
   (default → long → invalid-input preservation → default), isolated HOME and no inference.
   Live Copilot/Claude/Codex CLI inference **SKIP**: no optional credentials mounted in the

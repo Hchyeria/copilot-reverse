@@ -99,6 +99,30 @@ async function contextTierChecks() {
       check(`${tier}: model resolves to unchanged upstream id`, router.resolveModel(listed[0].id) === tiered.id);
     } finally { await new Promise((resolve) => server.close(resolve)); }
   }
+  const { updateModelBudgets } = await import("../../dist/tui/model-budgets.js");
+  const { resolveClaudeModelMap } = await import("../../dist/core/claude-model-map.js");
+  const { claudeCopilotReverseEnv } = await import("../../dist/tui/setup/clients.js");
+  for (const [name, data] of [
+    ["default-only", [{ ...tiered, id: "claude-sonnet-5", billing: { token_prices: { default: { max_prompt_tokens: 272_000 } } } }]],
+    ["missing-limit", [{ id: "gpt-6-astra" }]],
+    ["discovery-failed", null],
+  ]) {
+    const discovery = await fetchModelDiscovery("fixture", async () => data === null ? new Response(null, { status: 503 }) : new Response(JSON.stringify({ data })));
+    const router = new Router([dummy], {}, { claudeMapEnabled: true });
+    router.setAvailableModels(discovery.ids, discovery.live);
+    router.setModelLimits(discovery.limits);
+    router.setOneMModels(discovery.oneM);
+    const budgets = {};
+    updateModelBudgets(budgets, discovery.ids, discovery.limits, discovery.live, true, resolveClaudeModelMap());
+    const env = claudeCopilotReverseEnv("http://fixture", "fixture", "claude-sonnet-5", budgets["claude-sonnet-5"]);
+    check(`${name}: setup does not infer 1M`, !env.ANTHROPIC_MODEL.endsWith("[1m]") && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === (name === "default-only" ? "272000" : "110000"));
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    try {
+      const listed = (await jget(`http://${HOST}:${server.address().port}/anthropic/v1/models`)).j.data;
+      check(`${name}: HTTP picker never invents 1M`, listed.every((m) => !m.id.endsWith("[1m]")));
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
 }
 
 async function main() {
