@@ -17,8 +17,11 @@ export class DaemonClient {
   async restart(): Promise<void> { return this.post("/api/restart"); }
   async stop(): Promise<void> { return this.post("/api/stop"); }
   async start(): Promise<void> { return this.post("/api/start"); }
-  private async record(action: "start" | "end"): Promise<RecordingStatus> {
-    const response = await this.fetchFn(`${this.base}/api/recording/${action}`, { method: "POST" });
+  private async record(action: "start" | "end", mode?: import("../shared/recording.js").RecordingMode): Promise<RecordingStatus> {
+    const response = await this.fetchFn(`${this.base}/api/recording/${action}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: action === "start" ? JSON.stringify({ mode: mode ?? "error" }) : undefined,
+    });
     if (!response.ok) {
       let detail = "check /status and ensure the worker is ready";
       try {
@@ -29,7 +32,7 @@ export class DaemonClient {
     }
     return await response.json() as RecordingStatus;
   }
-  async recordStart(): Promise<RecordingStatus> { return this.record("start"); }
+  async recordStart(mode: import("../shared/recording.js").RecordingMode = "error"): Promise<RecordingStatus> { return this.record("start", mode); }
   async recordEnd(): Promise<RecordingStatus> { return this.record("end"); }
   // ping=true runs the slower per-configured-model connectivity probe; default (false) is the cheap
   // light check (also what the dashboard polls). The TUI /doctor passes true.

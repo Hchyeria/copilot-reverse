@@ -49,9 +49,9 @@ describe("recording IPC lifecycle", () => {
       onWorkerMessage: (m) => { if (m.type === "recording-reply") snapshots.push(monitor.recordingStatus()); },
     });
     monitor.start(); ready();
-    const response = monitor.recording("start");
+    const response = monitor.recording("start", "full");
     const id = commandId();
-    expect(current().send).toHaveBeenCalledWith({ type: "recording-command", id, action: "start" }, expect.any(Function));
+    expect(current().send).toHaveBeenCalledWith({ type: "recording-command", id, action: "start", mode: "full" }, expect.any(Function));
     current().message({ type: "recording-reply", id: "unrelated", status: active });
     expect(monitor.recordingStatus()).toEqual(off);
     current().message({ type: "recording-reply", id, status: active });

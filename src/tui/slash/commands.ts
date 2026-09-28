@@ -10,7 +10,7 @@ import type { RecordingStatus } from "../../shared/recording.js";
 export function recordingLines(s: RecordingStatus): string[] {
   const state = s.active ? "active" : s.inFlight ? "stopped enrollment; draining" : s.directory ? "stopped" : "off";
   return [
-    `REC ${state} — ${s.requests} requests, ${s.inFlight} in flight`,
+    `REC ${state}${s.mode ? ` (${s.mode})` : ""} — ${s.requests} requests, ${s.inFlight} in flight`,
     ...(s.directory ? [`directory: ${s.directory}`] : []),
     ...(s.warning ? [`WARNING: ${oneLine(s.warning, 500)}`] : []),
   ];
@@ -43,10 +43,13 @@ export function buildRegistry(ctx: SlashContext, endpoint: Endpoint, opts: Regis
   for (const action of ["start", "end"] as const) {
     reg.add({
       name: `/record-${action}`,
-      describe: action === "start" ? "record proxy requests locally (private bodies included)" : "stop recording new requests; let captures drain",
-      run: async (_a, c) => {
+      describe: action === "start" ? "record failed requests; pass 'full' to retain all" : "stop recording new requests; let captures drain",
+      run: async (args, c) => {
+        const mode = args[0] ?? "error";
+        if (action === "start" && (args.length > 1 || !["error", "full"].includes(mode))) return ["usage: /record-start [error|full]"];
+        if (action === "end" && args.length) return ["usage: /record-end"];
         try {
-          const s = await (action === "start" ? c.client.recordStart() : c.client.recordEnd());
+          const s = await (action === "start" ? c.client.recordStart(mode as "error" | "full") : c.client.recordEnd());
           return [
             ...recordingLines(s),
             "Privacy: full request/response bodies may contain secrets and private data. Keep recordings private; delete them manually.",

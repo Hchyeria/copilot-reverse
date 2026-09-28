@@ -20,13 +20,14 @@ const active: RecordingStatus = { active: true, directory: "/private/session", r
 describe("recording control API", () => {
   it("returns worker status directly from start/end and exposes the snapshot via /api/status", async () => {
     let status = active;
-    const recording = vi.fn(async (action) => { status = { ...status, active: action === "start" }; return status; });
+    const recording = vi.fn(async (action, mode) => { status = { ...status, active: action === "start", ...(action === "start" ? { mode } : {}) }; return status; });
     const app = fixture({ recording, recordingStatus: () => status });
-    expect((await request(app).post("/api/recording/start").expect(200)).body).toEqual(active);
-    expect((await request(app).get("/api/status")).body.recording).toEqual(active);
+    expect((await request(app).post("/api/recording/start").expect(200)).body).toEqual({ ...active, mode: "error" });
+    expect((await request(app).post("/api/recording/start").send({ mode: "full" }).expect(200)).body.mode).toBe("full");
+    expect((await request(app).get("/api/status")).body.recording).toEqual({ ...active, mode: "full" });
     const end = (await request(app).post("/api/recording/end").expect(200)).body;
-    expect(end).toEqual({ ...active, active: false }); // enrollment stopped, still draining
-    expect(recording.mock.calls.map(([action]) => action)).toEqual(["start", "end"]);
+    expect(end).toEqual({ ...active, active: false, mode: "full" }); // enrollment stopped, still draining
+    expect(recording.mock.calls).toEqual([["start", "error"], ["start", "full"], ["end", undefined]]);
   });
   it("omits recording for older deps and explicitly rejects unsupported commands", async () => {
     const app = fixture();

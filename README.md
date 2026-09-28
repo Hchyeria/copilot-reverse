@@ -79,7 +79,7 @@ Prefer commands? Type `/` to see them all. The essentials:
 | `/network` | Choose access mode: localhost (private) or LAN (shared, key required) |
 | `/status` · `/doctor` | Is everything healthy? (`/status` shows each client's scope + model) |
 | `/logs` · `/metrics` | What ran, what failed, and why |
-| `/record-start` · `/record-end` | Manually capture full proxy requests/responses to private local files ([guide](docs/request-recording.md)) |
+| `/record-start [error\|full]` · `/record-end` | Capture failed proxy requests by default, or all requests with `full` ([guide](docs/request-recording.md)) |
 | `/dashboard` | Open a live web dashboard in your browser |
 | `/report` | File a pre-filled bug report (diagnostics only — no prompts) |
 | `/reset-claude` · `/reset-codex` | Undo setup, restore original config |

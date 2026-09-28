@@ -44,10 +44,10 @@ it("controls real worker recording over IPC and HTTP without touching the user's
       db, getState: () => monitor!.currentState(), start: () => monitor!.start(), stop: () => monitor!.stop(), restart: () => monitor!.restartManually(),
       doctor: async () => [], github: () => undefined, models: async () => [], subscribe: () => () => {},
       clients: () => ({ claude: { user: false, project: false }, codex: { user: false, project: false }, pi: { user: false, project: false } }),
-      recording: (action) => monitor!.recording(action), recordingStatus: () => monitor!.recordingStatus(),
+      recording: (action, mode) => monitor!.recording(action, mode), recordingStatus: () => monitor!.recordingStatus(),
     });
     expect((await request(app).get("/api/status")).body.recording.active).toBe(false);
-    const session = (await request(app).post("/api/recording/start").expect(200)).body;
+    const session = (await request(app).post("/api/recording/start").send({ mode: "full" }).expect(200)).body;
     expect(session.active).toBe(true);
     const base = `http://127.0.0.1:${workerPort}`;
     const body = '{ "model":"gpt-test", "messages":[{"role":"user","content":"你好"}] }';

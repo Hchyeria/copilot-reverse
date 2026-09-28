@@ -77,7 +77,7 @@ describe("manual request recorder", () => {
     const body = '{ "model": "gpt-test", "messages": [{"role":"user","content":"你好"}], "max_tokens": 20 }';
     await request(app).post("/openai/chat/completions").set("Content-Type", "application/json").send(body).expect(200);
     await expect(stat(path)).rejects.toMatchObject({ code: "ENOENT" });
-    const started = await recorder.start(); expect((await recorder.start()).directory).toBe(started.directory);
+    const started = await recorder.start("full"); expect((await recorder.start("full")).directory).toBe(started.directory);
     await request(app).post("/openai/chat/completions").set("Content-Type", "application/json").set("Authorization", "Bearer client-secret").set("Cookie", "s=cookie-secret").send(body).expect(200);
     await settle(recorder);
     const [dir] = await directories(started.directory!);
@@ -101,8 +101,32 @@ describe("manual request recorder", () => {
     expect(await directories(started.directory!)).toHaveLength(1);
   });
 
-  it("keeps a large request intact without a capture size cutoff", async () => {
+  it("defaults to error mode, discards successful artifacts, and counts only retained failures", async () => {
     const recorder = new RequestRecorder(await root()); const session = await recorder.start();
+    expect(session.mode).toBe("error");
+    const app = harness(recorder, (async () => response()) as typeof fetch);
+    await request(app).post("/openai/chat/completions").send({ model: "gpt-test", messages: [] }).expect(200);
+    await settle(recorder);
+    expect(await directories(session.directory!)).toHaveLength(0);
+    expect(recorder.status()).toMatchObject({ mode: "error", requests: 0 });
+  });
+
+  it("error mode retains client errors and HTTP-200 SSE error events", async () => {
+    const recorder = new RequestRecorder(await root()); const session = await recorder.start("error");
+    let calls = 0;
+    const sseError = 'data: {"type":"error","message":"upstream failed"}\n\n';
+    const app = harness(recorder, (async () => ++calls === 1
+      ? new Response(new ReadableStream({ start(c) { c.enqueue(Buffer.from(sseError)); c.close(); } }), { headers: { "content-type": "text/event-stream" } })
+      : response()) as typeof fetch);
+    await request(app).post("/openai/chat/completions").send({ model: "gpt-test", messages: [], stream: true }).expect(200);
+    await request(app).post("/openai/responses").set("Content-Type", "application/json").send("{bad").expect(400);
+    await settle(recorder);
+    const dirs = await directories(session.directory!); expect(dirs).toHaveLength(2);
+    expect(recorder.status().requests).toBe(2);
+  });
+
+  it("keeps a large request intact without a capture size cutoff", async () => {
+    const recorder = new RequestRecorder(await root()); const session = await recorder.start("full");
     const text = "大".repeat(400_000);
     const app = harness(recorder, (async () => response()) as typeof fetch);
     await request(app).post("/openai/chat/completions").send({ model: "gpt-test", messages: [{ role: "user", content: text }] }).expect(200);
@@ -113,7 +137,7 @@ describe("manual request recorder", () => {
   });
 
   it.each([408, 429, 413])("retains complete %s error even though adapter formats a truncated message", async (status) => {
-    const recorder = new RequestRecorder(await root()); const started = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const started = await recorder.start("full");
     const error = JSON.stringify({ error: { message: "Timed out reading request body. Try again, or use a smaller request size." + "x".repeat(2000), code: "user_request_timeout" } });
     const app = harness(recorder, (async () => new Response(error, { status, headers: { "content-type": "application/json", "retry-after": "10", "x-request-id": "upstream-id", "set-cookie": "secret" } })) as typeof fetch);
     await request(app).post("/openai/chat/completions").send({ model: "gpt-test", stream: true, messages: [] });
@@ -126,7 +150,7 @@ describe("manual request recorder", () => {
   });
 
   it("separates concurrent requests and endpoint fallback attempts", async () => {
-    const recorder = new RequestRecorder(await root()); const started = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const started = await recorder.start("full");
     const fn = (async (url, init) => {
       if (String(url).endsWith("/chat/completions")) return new Response('{"error":{"code":"unsupported_api_for_model","message":"use the Responses API"}}', { status: 400 });
       return response(JSON.parse(init?.body as string).input[0].content[0].text);
@@ -143,7 +167,7 @@ describe("manual request recorder", () => {
   });
 
   it("records a fetch exception and still returns the normal proxy failure", async () => {
-    const recorder = new RequestRecorder(await root()); const started = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const started = await recorder.start("full");
     const app = harness(recorder, (async () => { throw new Error("fetch failed"); }) as typeof fetch);
     await request(app).post("/openai/responses").send({ model: "gpt-test", input: "hello" }).expect(502);
     await settle(recorder);
@@ -152,7 +176,7 @@ describe("manual request recorder", () => {
   });
 
   it("ends enrollment without cutting off an in-flight stream, even when another session starts", async () => {
-    const recorder = new RequestRecorder(await root()); const firstSession = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const firstSession = await recorder.start("full");
     let source!: ReadableStreamDefaultController<Uint8Array>;
     let arrived!: () => void;
     const fetching = new Promise<void>((r) => { arrived = r; });
@@ -166,7 +190,7 @@ describe("manual request recorder", () => {
     source.enqueue(Buffer.from(prefix));
     const stopped = await recorder.end();
     expect(stopped.active).toBe(false); expect(stopped.inFlight).toBe(1);
-    const nextSession = await recorder.start(); expect(nextSession.directory).not.toBe(firstSession.directory);
+    const nextSession = await recorder.start("full"); expect(nextSession.directory).not.toBe(firstSession.directory);
     const suffix = 'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}\n\n';
     source.enqueue(Buffer.from(suffix)); source.close();
     expect((await running).status).toBe(200); await settle(recorder);
@@ -184,13 +208,13 @@ describe("manual request recorder", () => {
     const seen = new Promise<void>((r) => { arrived = r; });
     const app = harness(recorder, (async () => { arrived(); await pending; return response(); }) as typeof fetch);
     const running = request(app).post("/openai/responses").send({ model: "gpt-test", input: "hi" }).then((r) => r);
-    await seen; const session = await recorder.start(); release();
+    await seen; const session = await recorder.start("full"); release();
     await running;
     expect(await directories(session.directory!)).toHaveLength(0);
   });
 
   it("captures Anthropic and Responses ingress as well as malformed JSON", async () => {
-    const recorder = new RequestRecorder(await root()); const session = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const session = await recorder.start("full");
     const app = harness(recorder, (async () => response()) as typeof fetch);
     await request(app).post("/anthropic/v1/messages").send({ model: "gpt-test", max_tokens: 20, messages: [{ role: "user", content: "anthropic" }] }).expect(200);
     await request(app).post("/openai/responses").send({ model: "gpt-test", input: "responses" }).expect(200);
@@ -201,7 +225,7 @@ describe("manual request recorder", () => {
   });
 
   it("marks stream errors incomplete and preserves bytes received before the error", async () => {
-    const recorder = new RequestRecorder(await root()); const session = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const session = await recorder.start("full");
     let count = 0;
     const prefix = 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n';
     const app = harness(recorder, (async () => new Response(new ReadableStream({ pull(c) {
@@ -218,14 +242,14 @@ describe("manual request recorder", () => {
   it("does not block proxy traffic when recording storage disappears", async () => {
     const warnings: unknown[] = [];
     const recorder = new RequestRecorder(await root(), (s) => { if (s.warning) warnings.push(s.warning); });
-    const session = await recorder.start(); await rm(session.directory!, { recursive: true });
+    const session = await recorder.start("full"); await rm(session.directory!, { recursive: true });
     const app = harness(recorder, (async () => response()) as typeof fetch);
     await request(app).post("/openai/responses").send({ model: "gpt-test", input: "hi" }).expect(200);
     await settle(recorder); expect(warnings.length).toBeGreaterThan(0); expect(recorder.status().warning).toContain("incomplete");
   });
 
   it("streams exact SSE bytes with batching, including a 200 error event", async () => {
-    const recorder = new RequestRecorder(await root()); const started = await recorder.start();
+    const recorder = new RequestRecorder(await root()); const started = await recorder.start("full");
     const data = 'data: {"type":"response.output_text.delta","delta":"你好"}\n\ndata: {"type":"error","message":"upstream stream failure"}\n\n';
     const bytes = Buffer.from(data);
     const app = harness(recorder, (async () => new Response(new ReadableStream({ start(c) { for (const byte of bytes) c.enqueue(Uint8Array.of(byte)); c.close(); } }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch);

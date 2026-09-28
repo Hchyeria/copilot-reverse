@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RequestHandler } from "express";
-import type { RecordingStatus } from "../../shared/recording.js";
+import type { RecordingMode, RecordingStatus } from "../../shared/recording.js";
 import type { MetricSink } from "../server.js";
 import { BatchWriter, type BatchOptions } from "./batch-writer.js";
 import { APP_VERSION } from "../../version.js";
@@ -32,6 +32,7 @@ async function json(path: string, value: unknown): Promise<void> {
 }
 interface Session {
   directory: string;
+  mode: RecordingMode;
   requests: number;
   active: boolean;
   startedAt: string;
@@ -56,6 +57,8 @@ class RequestCapture {
   private incomplete = false;
   private warnings: string[] = [];
   private metric?: Parameters<MetricSink>[0];
+  private upstreamFailed = false;
+  private streamErrorScan = "";
 
   constructor(readonly session: Session, private recorder: RequestRecorder,
     private method: string, private path: string, private headers: Record<string, string>) {
@@ -152,11 +155,12 @@ class RequestCapture {
     let response: Response;
     startedAt = Date.now();
     try { response = await fetchFn(input, init); }
-    catch (e) { await attempt.finish("fetch-error", e); throw e; }
+    catch (e) { this.upstreamFailed = true; await attempt.finish("fetch-error", e); throw e; }
     // The client can disappear while fetch is still waiting for headers. That attempt was
     // finalized as incomplete; do not reopen its writer or change the original fetch behavior.
     if (ended) return response;
     headersAt = Date.now(); status = response.status;
+    if (!response.ok) this.upstreamFailed = true;
     await this.safe(() => json(join(directory, "response-metadata.json"), {
       status, statusText: response.statusText, headers: diagnosticHeaders(response.headers),
       headersReceivedAt: new Date(headersAt!).toISOString(),
@@ -176,9 +180,17 @@ class RequestCapture {
           const { done, value } = await reader!.read();
           if (done) { bodyComplete = true; await attempt.finish("complete"); controller.close(); return; }
           firstBodyAt ??= Date.now(); responseBytes += value.byteLength;
+          if (filename === "response.sse" && !this.upstreamFailed) {
+            // Inspect only bounded carry + the current chunk. This catches an error marker split
+            // across chunks without retaining or repeatedly scanning an ever-growing response.
+            const decoded = new TextDecoder().decode(value);
+            const scan = this.streamErrorScan + decoded;
+            if (/"type"\s*:\s*"error"/.test(scan)) this.upstreamFailed = true;
+            this.streamErrorScan = scan.slice(-64);
+          }
           await attempt.writer!.append(value);
           controller.enqueue(value);
-        } catch (e) { await attempt.finish("stream-error", e); controller.error(e); }
+        } catch (e) { this.upstreamFailed = true; await attempt.finish("stream-error", e); controller.error(e); }
       },
       cancel: async (reason) => { await attempt.finish("cancelled", reason); },
     }, { highWaterMark: 0 });
@@ -190,12 +202,19 @@ class RequestCapture {
     return this.finalizing ??= (async () => {
       await this.saveInbound();
       await Promise.all(this.attempts.map((a) => a.finish("consumer-ended")));
-      await this.safe(() => json(join(this.directory, "result.json"), {
-        complete: !this.incomplete && !aborted, outcome: aborted ? "client-disconnected" : "finished",
-        clientStatus, elapsedMs: Date.now() - this.startedAt, upstreamAttempts: this.attempts.length,
-        metric: this.metric, warnings: this.warnings,
-      }));
-      this.recorder.finished(this);
+      const failed = aborted || this.upstreamFailed || clientStatus >= 400 || Boolean(this.metric?.error) || (this.metric?.status ?? 0) >= 400;
+      const retained = this.session.mode === "full" || failed;
+      if (retained) {
+        await this.safe(() => json(join(this.directory, "result.json"), {
+          complete: !this.incomplete && !aborted, outcome: aborted ? "client-disconnected" : "finished",
+          clientStatus, elapsedMs: Date.now() - this.startedAt, upstreamAttempts: this.attempts.length,
+          metric: this.metric, warnings: this.warnings,
+        }));
+      } else {
+        try { await rm(this.directory, { recursive: true, force: true }); }
+        catch (e) { this.fail(e); }
+      }
+      await this.recorder.finished(this, retained);
     })();
   }
 }
@@ -213,7 +232,7 @@ export class RequestRecorder {
   status(): RecordingStatus {
     const session = this.current ?? this.last;
     return {
-      active: Boolean(this.current), directory: session?.directory, requests: session?.requests ?? 0,
+      active: Boolean(this.current), mode: session?.mode, directory: session?.directory, requests: session?.requests ?? 0,
       inFlight: this.captures.size, warning: this.latestWarning ?? session?.warning,
     };
   }
@@ -222,14 +241,14 @@ export class RequestRecorder {
   private serialize<T>(fn: () => Promise<T>): Promise<T> {
     const p = this.changing.then(fn); this.changing = p.catch(() => {}); return p;
   }
-  start(): Promise<RecordingStatus> {
+  start(mode: RecordingMode = "error"): Promise<RecordingStatus> {
     return this.serialize(async () => {
       if (this.current) return this.status();
       const startedAt = new Date().toISOString();
       const directory = join(this.root, `${startedAt.replace(/[:.]/g, "-")}-${randomUUID()}`);
       await mkdir(this.root, { recursive: true, mode: 0o700 });
       await mkdir(directory, { mode: 0o700 });
-      const session: Session = { directory, startedAt, active: true, requests: 0 };
+      const session: Session = { directory, mode, startedAt, active: true, requests: 0 };
       await json(join(directory, "session.json"), { schemaVersion: 1, appVersion: APP_VERSION, ...session });
       this.current = this.last = session; this.latestWarning = undefined; this.emit(); return this.status();
     });
@@ -248,7 +267,17 @@ export class RequestRecorder {
       this.emit(); return this.status();
     });
   }
-  finished(capture: RequestCapture): void { this.captures.delete(capture); this.emit(); }
+  finished(capture: RequestCapture, retained: boolean): Promise<void> {
+    this.captures.delete(capture);
+    return this.serialize(async () => {
+      if (retained) {
+        capture.session.requests++;
+        try { await json(join(capture.session.directory, "session.json"), { schemaVersion: 1, appVersion: APP_VERSION, ...capture.session }); }
+        catch { this.warn(capture.session, `Recording incomplete: unable to update session summary (${capture.session.directory})`); }
+      }
+      this.emit();
+    });
+  }
   metric: MetricSink = (metric) => { this.context.getStore()?.setMetric(metric); };
   // express.json verify callback runs before the original buffer is discarded/transformed.
   body = (_req: unknown, _res: unknown, buffer: Buffer): void => { this.context.getStore()?.setBody(buffer); };
@@ -260,7 +289,7 @@ export class RequestRecorder {
       if (HEADER_NAMES.has(name) && value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
     }
     const capture = new RequestCapture(session, this, req.method, req.path, diagnosticHeaders(headers));
-    session.requests++; this.captures.add(capture); this.emit();
+    this.captures.add(capture); this.emit();
     res.once("finish", () => { void capture.finish(res.statusCode, false); });
     res.once("close", () => { void capture.finish(res.statusCode, !res.writableFinished); });
     this.context.run(capture, next);

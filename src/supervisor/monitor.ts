@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { RestartPolicy, AppConfig } from "../shared/config.js";
 import type { WorkerToSupervisor } from "../shared/ipc.js";
 import type { WorkerState } from "../shared/control-types.js";
-import type { RecordingAction, RecordingStatus } from "../shared/recording.js";
+import type { RecordingAction, RecordingMode, RecordingStatus } from "../shared/recording.js";
 
 interface PendingRecording {
   resolve: (status: RecordingStatus) => void;
@@ -72,7 +72,7 @@ export class WorkerMonitor {
   }
   currentState(): WorkerState { return this.state; }
   recordingStatus(): RecordingStatus { return { ...this.recorded }; }
-  async recording(action: RecordingAction): Promise<RecordingStatus> {
+  async recording(action: RecordingAction, mode?: RecordingMode): Promise<RecordingStatus> {
     const child = this.child;
     if (!child?.connected || child.killed || this.stopped || this.restartPromise || this.state !== "ready") {
       throw new Error("Recording unavailable: worker is not ready — start the worker and try again.");
@@ -89,7 +89,7 @@ export class WorkerMonitor {
       const timer = setTimeout(() => fail(new Error(`Recording ${action} timed out after 5s — check /status before retrying.`)), 5000);
       this.recordingPending.set(id, { resolve, reject, timer, sequence: ++this.recordingSequence, statusVersion: this.recordingStatusVersion });
       try {
-        child.send({ type: "recording-command", id, action }, (error: Error | null) => {
+        child.send({ type: "recording-command", id, action, ...(mode ? { mode } : {}) }, (error: Error | null) => {
           if (error) fail(new Error(`Recording ${action} failed: ${error.message}`));
         });
       } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }

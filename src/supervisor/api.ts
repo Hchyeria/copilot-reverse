@@ -18,7 +18,7 @@ export interface ControlDeps {
   github: () => GithubStatus | undefined;
   clients: () => ClientStatus;          // per-scope Claude/Codex config read from the real files
   models: () => Promise<DashModel[]>;   // advertised models (proxied from the worker), for the dashboard
-  recording?: (action: RecordingAction) => Promise<RecordingStatus>;
+  recording?: (action: RecordingAction, mode?: import("../shared/recording.js").RecordingMode) => Promise<RecordingStatus>;
   recordingStatus?: () => RecordingStatus;
   now?: () => number;                   // clock for the 24h metrics window; injectable for tests
   subscribe: (send: (event: string, data: unknown) => void) => () => void;
@@ -31,9 +31,10 @@ export function createControlApp(deps: ControlDeps): Express {
   app.get("/api/status", (_req, res) => res.json({ workerState: deps.getState(), restarts: listRestarts(deps.db, 50), github: deps.github(), recording: deps.recordingStatus?.() }));
   // These routes belong ONLY to the supervisor's loopback listener, never the worker proxy.
   for (const action of ["start", "end"] as const) {
-    app.post(`/api/recording/${action}`, async (_req, res) => {
+    app.post(`/api/recording/${action}`, async (req, res) => {
       if (!deps.recording) { res.status(503).json({ error: "Recording controls unavailable — update/restart the supervisor." }); return; }
-      try { res.json(await deps.recording(action)); }
+      const mode = action === "start" ? (req.body?.mode === "full" ? "full" : "error") : undefined;
+      try { res.json(await deps.recording(action, mode)); }
       catch (error) { res.status(503).json({ error: error instanceof Error ? error.message : String(error) }); }
     });
   }

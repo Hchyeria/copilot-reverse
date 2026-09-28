@@ -37,7 +37,7 @@ describe("slash commands", () => {
   });
   it("registers recording commands for execution, help, and autocomplete", async () => {
     const c = { ...ctx(), client: { ...ctx().client,
-      recordStart: vi.fn(async () => ({ active: true, directory: "/private/session", requests: 2, inFlight: 1 })),
+      recordStart: vi.fn(async (mode) => ({ active: true, mode, directory: "/private/session", requests: 2, inFlight: 1 })),
       recordEnd: vi.fn(async () => ({ active: false, directory: "/private/session", requests: 2, inFlight: 1, warning: "incomplete: disk full" })),
     } };
     const reg = buildRegistry(c as any, endpoint);
@@ -46,12 +46,17 @@ describe("slash commands", () => {
       expect((await reg.run("/help")).join("\n")).toContain(name);
     }
     const start = (await reg.run("/record-start")).join("\n");
-    expect(c.client.recordStart).toHaveBeenCalledOnce();
-    expect(start).toContain("REC active");
+    expect(c.client.recordStart).toHaveBeenCalledWith("error");
+    expect(start).toContain("REC active (error)");
     expect(start).toContain("/private/session");
     expect(start).toContain("2 requests, 1 in flight");
     expect(start).toMatch(/bodies.*secrets.*private data/);
     expect(start).toContain("direct github-copilot traffic is not captured");
+    const full = (await reg.run("/record-start full")).join("\n");
+    expect(c.client.recordStart).toHaveBeenLastCalledWith("full");
+    expect(full).toContain("REC active (full)");
+    expect((await reg.run("/record-start nope")).join("\n")).toContain("usage:");
+    expect((await reg.run("/record-start error extra")).join("\n")).toContain("usage:");
     const end = (await reg.run("/record-end")).join("\n");
     expect(c.client.recordEnd).toHaveBeenCalledOnce();
     expect(end).toContain("stopped enrollment; draining");

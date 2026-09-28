@@ -45,10 +45,12 @@ describe("DaemonClient", () => {
     const f = vi.fn(async (_url: string, _init?: RequestInit) => json(status));
     const c = new DaemonClient("http://x", f as typeof fetch);
     expect(await c.recordStart()).toEqual(status);
+    expect(await c.recordStart("full")).toEqual(status);
     expect(await c.recordEnd()).toEqual(status);
     expect(f.mock.calls).toEqual([
-      ["http://x/api/recording/start", { method: "POST" }],
-      ["http://x/api/recording/end", { method: "POST" }],
+      ["http://x/api/recording/start", { method: "POST", headers: { "content-type": "application/json" }, body: '{"mode":"error"}' }],
+      ["http://x/api/recording/start", { method: "POST", headers: { "content-type": "application/json" }, body: '{"mode":"full"}' }],
+      ["http://x/api/recording/end", { method: "POST", headers: { "content-type": "application/json" }, body: undefined }],
     ]);
   });
   it.each(["recordStart", "recordEnd"] as const)("%s checks HTTP status and surfaces the supervisor error", async (method) => {

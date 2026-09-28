@@ -92,10 +92,10 @@ async function main() {
     log("[recording] manual control, parser error, token count, and private artifacts (no upstream call)");
     {
       check("recording defaults off", (await jget(supUrl("/api/status"))).j?.recording?.active === false);
-      const start = await jpost(supUrl("/api/recording/start"), "{}");
+      const start = await jpost(supUrl("/api/recording/start"), '{"mode":"full"}');
       const session = JSON.parse(start.t);
       check("record-start enabled on worker", start.s === 200 && session.active === true, start.t);
-      check("duplicate record-start reuses directory", JSON.parse((await jpost(supUrl("/api/recording/start"), "{}")).t).directory === session.directory);
+      check("duplicate record-start reuses directory", JSON.parse((await jpost(supUrl("/api/recording/start"), '{"mode":"full"}')).t).directory === session.directory);
       const raw = '{ "model":"gpt-4o", "messages":[{"role":"user","content":"录制 test"}] }';
       check("recorded count_tokens works", (await jpost(wrkUrl("/anthropic/v1/messages/count_tokens"), raw, { authorization: "Bearer do-not-record-header" })).s === 200);
       check("recorded malformed JSON still returns 400", (await jpost(wrkUrl("/openai/responses"), "{bad")).s === 400);

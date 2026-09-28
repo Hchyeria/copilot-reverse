@@ -92,7 +92,7 @@ const hb = setInterval(() => send({ type: "heartbeat", ts: Date.now() }), 5_000)
 
 process.on("message", (m: SupervisorToWorker) => {
   if (m?.type === "recording-command") {
-    const operation = m.action === "start" ? recorder.start() : m.action === "end" ? recorder.end() : Promise.resolve(recorder.status());
+    const operation = m.action === "start" ? recorder.start(m.mode ?? "error") : m.action === "end" ? recorder.end() : Promise.resolve(recorder.status());
     void operation.then(
       (status) => send({ type: "recording-reply", id: m.id, status }),
       () => send({ type: "recording-reply", id: m.id, error: "Recording storage unavailable; check directory permissions and free disk space" }),

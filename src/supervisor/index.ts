@@ -97,7 +97,7 @@ export function startSupervisor(): { stop: () => void } {
     restart: () => monitor.restartManually(),
     stop: () => monitor.stop(),
     start: () => monitor.start(),
-    recording: (action) => monitor.recording(action),
+    recording: (action, mode) => monitor.recording(action, mode),
     recordingStatus: () => monitor.recordingStatus(),
     doctor,
     github: () => heartbeat.current(),

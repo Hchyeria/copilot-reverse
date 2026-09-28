@@ -2,13 +2,14 @@
 
 Use recording when investigating upstream errors, large contexts, or request/response translation. Recording is **off by default** and requires no change to client request bodies.
 
-1. Run `/record-start` in the copilot-reverse TUI.
-2. Reproduce the problem in a client pointing to this worker (Claude, Codex, pi, etc.).
-3. Run `/record-end`. Use the directory printed by the command to inspect artifacts.
+1. Run `/record-start` (equivalent to `/record-start error`) in the copilot-reverse TUI. It stages each request while in flight but retains only failures.
+2. To retain successful requests too, run `/record-start full` instead.
+3. Reproduce the problem in a client pointing to this worker (Claude, Codex, pi, etc.).
+4. Run `/record-end`. Use the directory printed by the command to inspect artifacts.
 
 This captures **all clients sharing this worker**, including concurrent requests. Pi's direct `github-copilot` provider bypasses copilot-reverse and is not captured: select a provider pointing to the proxy first. It does not capture credential exchanges, model discovery, or WebIQ HTTP traffic. Copilot model calls in the main adapter and the optional borrow-search path are captured.
 
-The TUI shows recording status and directory. Start is idempotent while already active. End stops enrolling new requests and flushes current response buffers; already recorded in-flight requests continue until finished. A new start creates another session without moving older in-flight recordings into it. Worker restart turns recording off; it never resumes silently.
+The TUI shows recording mode, status, and directory. Start is idempotent while already active; end the current session before switching between `error` and `full`. End stops enrolling new requests and flushes current response buffers; already recorded in-flight requests continue until finished. A new start creates another session without moving older in-flight recordings into it. Worker restart turns recording off; it never resumes silently.
 
 ## Files
 
@@ -33,6 +34,8 @@ The TUI shows recording status and directory. Start is idempotent while already 
 - Metadata: method/path or safe upstream URL, explicitly allowlisted headers, byte counts, and timing milestones. Authorization, API-key, and cookie headers are excluded; URL query values and credentials are not persisted.
 - `response.body`/`response.sse`: upstream body bytes consumed by the proxy, including non-success responses and HTTP-200 streams containing errors. Error bodies are preserved beyond the normal UI's truncated error summary. No SSE reformatting is applied.
 - Result files: client/upstream status, transport outcome, metrics where available, and capture completeness. `complete` describes capture completeness, **not model success**. A completely saved 408 is complete; an interrupted response is not.
+
+In `error` mode, a request is retained when its client result is 4xx/5xx, its upstream call is non-2xx, fetch/streaming fails, the client disconnects early, metrics contain an error, or a 200 SSE stream contains a `type: "error"` event. Successful request directories are removed after completion and do not increment the retained request count. Data is still staged on disk while the outcome is unknown, so errors retain the same complete artifacts as full mode.
 
 Each upstream attempt is separate. A route fallback does not overwrite the rejected request. The session carries a schema version and app version for future replay tooling. Replay commands and automatic retries are not part of this feature.
 

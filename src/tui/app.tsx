@@ -55,7 +55,7 @@ export const sameStatus = (a: ClientStatus, b: ClientStatus): boolean =>
   sameScope(a.claude, b.claude) && sameScope(a.codex, b.codex) && sameScope(a.pi, b.pi);
 
 export const sameRecordingStatus = (a: RecordingStatus | undefined, b: RecordingStatus | undefined): boolean =>
-  a === b || (!!a && !!b && a.active === b.active && a.directory === b.directory &&
+  a === b || (!!a && !!b && a.active === b.active && a.mode === b.mode && a.directory === b.directory &&
     a.requests === b.requests && a.inFlight === b.inFlight && a.warning === b.warning);
 
 export function RecordingHud({ status }: { status?: RecordingStatus }) {

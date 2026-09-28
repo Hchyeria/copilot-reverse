@@ -48,7 +48,8 @@ external fetch disabled. The supervisor monitor and control API exercise the rea
 
 | ID | Scenario | Expected result |
 |----|----------|-----------------|
-| REC-01 | Fresh worker + recording start via control HTTP | Off initially; enabled state and private session directory returned |
+| REC-01 | Fresh worker + recording start via control HTTP | Off initially; default error mode (or explicit full mode) and private session directory returned |
+| REC-01b | Error-mode successful and failed requests | Successful artifacts are deleted; 4xx/5xx, network/stream failures, disconnects, metric errors, and 200 SSE error events are retained |
 | REC-02 | Count-tokens and malformed JSON while recording | Original JSON bytes preserved; parser failure captured with client status 400 |
 | REC-03 | End and restart | New requests excluded after end; worker restart resets recording off |
 | REC-04 | Proxy listener receives recording control URL (Docker) | 404; controls exist only on supervisor loopback listener |

@@ -1,4 +1,4 @@
-import type { RecordingAction, RecordingStatus } from "./recording.js";
+import type { RecordingAction, RecordingMode, RecordingStatus } from "./recording.js";
 
 export type WorkerToSupervisor =
   | { type: "ready"; port: number }
@@ -10,4 +10,4 @@ export type WorkerToSupervisor =
 export type SupervisorToWorker =
   | { type: "ping" }
   | { type: "shutdown" }
-  | { type: "recording-command"; id: string; action: RecordingAction };
+  | { type: "recording-command"; id: string; action: RecordingAction; mode?: RecordingMode };
