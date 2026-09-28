@@ -407,18 +407,18 @@ describe("TUI: model picker", () => {
 
   it("selects long context then standard on the same mounted model picker", async () => {
     const selected: string[] = [];
-    const loadModels = async () => ["gpt-6-astra", "gpt-6-astra:long_context"];
+    const loadModels = async () => ["gpt-6-astra", "gpt-6-astra-1M"];
     const { stdin, lastFrame } = render(<App registry={reg()} title="m" loadModels={loadModels}
-      modelLimits={{ "gpt-6-astra": 272000, "gpt-6-astra:long_context": 1000000 }}
+      modelLimits={{ "gpt-6-astra": 272000, "gpt-6-astra-1M": 1000000 }}
       onModelChange={(m) => selected.push(m)} />);
     await tick(); stdin.write("/model"); await tick(); stdin.write("\r"); await tick(80);
     expect(lastFrame() ?? "").toContain("272K");
     expect(lastFrame() ?? "").toContain("1M");
     stdin.write("\x1b[B"); await tick(); stdin.write("\r"); await tick(80);
-    expect(selected).toEqual(["gpt-6-astra:long_context"]);
+    expect(selected).toEqual(["gpt-6-astra-1M"]);
     stdin.write("/model"); await tick(); stdin.write("\r"); await tick(80);
     stdin.write("\r"); await tick(80);
-    expect(selected).toEqual(["gpt-6-astra:long_context", "gpt-6-astra"]);
+    expect(selected).toEqual(["gpt-6-astra-1M", "gpt-6-astra"]);
   });
 
   it("shows mapping arrows but submits the native Claude id", async () => {

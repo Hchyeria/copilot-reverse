@@ -112,7 +112,7 @@ you don't trade fidelity for a free backend.
   `x-copilot-reverse-effort` header.)
 - **🪟 Default and extended context budgets.** Tiered models default to Copilot's standard prompt
   budget (e.g. Astra 272K), rather than automatically opting into long-context pricing. Select
-  the separate `:long_context` model-list entry for the larger budget; switch back to the bare model
+  the separate long-context model-list entry (`gpt-6-astra-1M` for Astra) for the larger budget; switch back to the bare model
   for standard context, with no service restart. Generated pi configs include both entries. Untiered models keep their advertised window.
 - **🔀 Customizable Claude names for GPT-only accounts.** Run `/claude-map` to enable the feature and
   choose a live GPT backend for each current Claude identity. Defaults are Fable 5.1→gpt-6-astra,
@@ -207,7 +207,7 @@ Choose either entry in `/model` (GPT and Claude are both supported):
 
 ```text
 gpt-6-astra                default · 272K
-gpt-6-astra:long_context   long context · 1M
+gpt-6-astra-1M            long context · 1M
 ```
 
 Bare model IDs always use the standard budget. Switch entries for the next turn; no proxy restart
@@ -219,8 +219,9 @@ entries and `context_window` metadata. Clients must honor their own per-model bu
 merely changing a model ID cannot override a third-party client's global compaction setting.
 Claude/Codex setup writes the budget for the chosen entry.
 
-`:long_context` is a **local alias**, stripped before inference; both choices call the same Copilot
-model. There is no upstream activation header. The earlier global `context default|long_context`
+`gpt-6-astra-1M` is a **local alias**; both choices call the same Copilot `gpt-6-astra`
+model. The previous `gpt-6-astra:long_context` ID remains accepted for existing configs but is no
+longer listed. Other models retain their `:long_context` suffix. There is no upstream activation header. The earlier global `context default|long_context`
 command is retired and old global preferences do not override model choices.
 
 Budgets come from `/models` → `billing.token_prices.default/long_context.max_prompt_tokens`

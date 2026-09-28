@@ -1,4 +1,4 @@
-import { anthropicChoice, findModelChoice, LONG_CONTEXT_SUFFIX, type ModelChoice } from "../core/model-choices.js";
+import { anthropicChoice, findModelChoice, legacyContextId, LONG_CONTEXT_SUFFIX, type ModelChoice } from "../core/model-choices.js";
 import type { ProviderAdapter } from "../providers/types.js";
 import { bestModelMatch } from "../core/fuzzy.js";
 import { FALLBACK_MODELS } from "../providers/copilot/models.js";
@@ -94,6 +94,9 @@ export class Router {
   resolveModel(requested: string): string {
     const choice = this.choiceFor(requested);
     if (choice) return this.modelMap[stripOneM(requested)] ?? this.modelMap[choice.upstreamId] ?? choice.upstreamId;
+    // Exact real identities win over local decoding, including a future upstream name collision.
+    if (this.available.includes(requested)) return this.modelMap[requested] ?? requested;
+    requested = legacyContextId(stripOneM(requested));
     // Previously generated client configs must keep working if startup discovery is unavailable.
     // Decoding a local identity does not advertise a budget/capability; the client retains its budget.
     // Do not fuzzy-match an unadvertised variant to an unrelated model or leak our suffix upstream.

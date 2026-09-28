@@ -27,7 +27,7 @@ describe("context tier selection", () => {
     expect(await fetchModelLimits("test", fetchModels(), undefined, tier)).toEqual(d.limits);
     expect(await fetchModelOneMSupport("test", fetchModels(), undefined, tier)).toEqual(d.oneM);
     const pi = buildPiConfig(catalog, { host: "127.0.0.1", port: 7891, apiKey: "dummy" });
-    expect(pi[PI_OPENAI_PROVIDER].models[tier === "default" ? 0 : 1]).toMatchObject({ id: tier === "default" ? model.id : `${model.id}:long_context`, contextWindow: budget, maxTokens: 128_000 });
+    expect(pi[PI_OPENAI_PROVIDER].models[tier === "default" ? 0 : 1]).toMatchObject({ id: tier === "default" ? model.id : "gpt-6-astra-1M", contextWindow: budget, maxTokens: 128_000 });
     const router = new Router([], {});
     router.setAvailableModels(d.ids);
     router.setOneMModels(d.oneM);

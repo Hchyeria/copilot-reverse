@@ -115,19 +115,19 @@ async function contextTierChecks() {
     const base = `http://${HOST}:${server.address().port}`;
     try {
       const models = (await jget(`${base}/openai/models`)).j.data;
-      check("choices: GPT lists default and long budgets", models.find((m) => m.id === astra.id)?.context_window === 272_000 && models.find((m) => m.id === `${astra.id}:long_context`)?.context_window === 1_000_000);
+      check("choices: GPT lists default and long budgets", models.find((m) => m.id === astra.id)?.context_window === 272_000 && models.find((m) => m.id === "gpt-6-astra-1M")?.context_window === 1_000_000);
       const anthropic = (await jget(`${base}/anthropic/v1/models`)).j.data;
       check("choices: Claude lists both budgets", anthropic.some((m) => m.id === "claude-opus-4-8") && anthropic.some((m) => m.id === "claude-opus-4-8:long_context[1m]"));
-      for (const suffix of ["", ":long_context", ""]) {
+      for (const suffix of ["", "-1M", "", ":long_context"]) {
         const result = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: `${astra.id}${suffix}`, messages: [{ role: "user", content: "hi" }], stream: true }));
         check(`choices: GPT ${suffix || "default"} streams through same worker`, result.s === 200 && result.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
       }
-      const response = await jpost(`${base}/openai/responses`, JSON.stringify({ model: `${astra.id}:long_context`, input: "hi", stream: true }));
+      const response = await jpost(`${base}/openai/responses`, JSON.stringify({ model: "gpt-6-astra-1M", input: "hi", stream: true }));
       check("choices: Responses strips local suffix", response.s === 200 && response.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
       const claude = await jpost(`${base}/anthropic/v1/messages`, JSON.stringify({ model: "claude-opus-4-8:long_context[1m]", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
       check("choices: Anthropic strips local suffix", claude.s === 200 && claude.t.includes("CHOICE_OK") && received.at(-1) === tiered.id);
       router.setModelChoices([]); router.setAvailableModels([], false);
-      const offline = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: `${astra.id}:long_context`, messages: [{ role: "user", content: "hi" }], stream: true }));
+      const offline = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: "gpt-6-astra-1M", messages: [{ role: "user", content: "hi" }], stream: true }));
       check("choices: saved pi alias survives unavailable discovery", offline.s === 200 && received.at(-1) === astra.id);
     } finally { await new Promise((resolve) => server.close(resolve)); }
   }

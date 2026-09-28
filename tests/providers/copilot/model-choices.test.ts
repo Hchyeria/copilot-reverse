@@ -13,7 +13,10 @@ describe("per-model context choices", () => {
     const d = await fetchModelDiscovery("fixture", fixture([astra]));
     const r = new Router([], {}, { claudeMapEnabled: true });
     r.setAvailableModels(d.ids); r.setModelChoices(d.choices);
-    expect(r.listModels()).toEqual([astra.id, `${astra.id}:long_context`]);
+    expect(r.listModels()).toEqual([astra.id, "gpt-6-astra-1M"]);
+    expect(r.listAnthropicModels().some((m) => m.id === "gpt-6-astra-1M")).toBe(true);
+    expect(r.resolveModel("gpt-6-astra-1M")).toBe(astra.id);
+    expect(r.modelLimit("gpt-6-astra-1M[1m]")).toBe(1_000_000);
     for (const [id, budget] of [[astra.id, 272_000], [`${astra.id}:long_context`, 1_000_000], [astra.id, 272_000]] as const) {
       expect(r.resolveModel(id)).toBe(astra.id);
       expect(r.modelLimit(id)).toBe(budget);
@@ -22,7 +25,7 @@ describe("per-model context choices", () => {
     expect(r.modelLimit("claude-fable-5-1:long_context[1m]")).toBe(1_000_000);
     const catalog = await fetchCopilotModelCatalog("fixture", fixture([astra]));
     const pi = buildPiConfig(catalog, { host: "localhost", port: 7891, apiKey: "fixture" });
-    expect(pi[PI_OPENAI_PROVIDER].models.map((m) => [m.id, m.contextWindow])).toEqual([[astra.id, 272_000], [`${astra.id}:long_context`, 1_000_000]]);
+    expect(pi[PI_OPENAI_PROVIDER].models.map((m) => [m.id, m.contextWindow])).toEqual([[astra.id, 272_000], ["gpt-6-astra-1M", 1_000_000]]);
   });
   it("lists distinct Claude identities and routes canonical dotted/dashed choices correctly", async () => {
     const m = { ...astra, id: "claude-opus-4.8" };
@@ -44,6 +47,7 @@ describe("per-model context choices", () => {
     // Empty startup discovery must not invalidate previously generated pi configs.
     const offline = new Router([], {});
     expect(offline.resolveModel(`${astra.id}:long_context`)).toBe(astra.id);
+    expect(offline.resolveModel("gpt-6-astra-1M")).toBe(astra.id);
     expect(offline.modelLimit(`${astra.id}:long_context`)).toBeUndefined();
   });
   it("retains explicit user remaps after choice discovery", async () => {
@@ -56,7 +60,7 @@ describe("per-model context choices", () => {
     expect(r.modelLimit(`${astra.id}:long_context`)).toBe(128_000);
   });
   it("preserves a real upstream identity colliding with our suffix", async () => {
-    const id = `${astra.id}:long_context`;
+    const id = "gpt-6-astra-1M";
     const d = await fetchModelDiscovery("fixture", fixture([astra, { id }]));
     const r = new Router([], {}); r.setAvailableModels(d.ids); r.setModelChoices(d.choices);
     expect(r.listModels().filter((m) => m === id)).toHaveLength(1);

@@ -43,7 +43,7 @@ const models = await fetchCopilotModelCatalog("fixture", async () => new Respons
 applyPi(models, { host: "127.0.0.1", port: 7891, apiKey: "fixture" });
 NODE
   PI_LIST=$(HOME="$CONTEXT_HOME" PI_CODING_AGENT_DIR="$CONTEXT_HOME/.pi/agent" pi --no-extensions --no-skills --no-prompt-templates --list-models gpt-6-astra 2>&1)
-  check "pi lists both context choices" 'echo "$PI_LIST" | grep -q "gpt-6-astra:long_context" && echo "$PI_LIST" | grep -q "272" && echo "$PI_LIST" | grep -q "1M"' "real pi model registry reads generated per-model budgets"
+  check "pi lists both context choices" 'echo "$PI_LIST" | grep -q "gpt-6-astra-1M" && echo "$PI_LIST" | grep -q "272" && echo "$PI_LIST" | grep -q "1M"' "real pi model registry reads generated per-model budgets"
   # No pricing tier: ensure no phantom long-context identity appears in the real client list.
   HOME="$CONTEXT_HOME" node --input-type=module <<'NODE'
 const { applyPi } = await import("./dist/tui/setup/pi-config.js");

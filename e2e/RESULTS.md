@@ -3,6 +3,13 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-29 (Astra long-choice rename)** — public model ID is now `gpt-6-astra-1M`;
+  old `gpt-6-astra:long_context` remains accepted but is not listed. `npm test`:
+  **97 files / 1,022 tests PASS**; build and diff check **PASS**; hermetic HTTP **21 PASS**;
+  actual CLI/model-list checks **6 PASS**. New/old identities, budgets, real-name collision and
+  discovery-unavailable decoding covered. Live inference **SKIP**, Docker unavailable;
+  live CLI remains a pre-merge gate. No host client configuration changed.
+
 - **2026-09-29 (per-model context choices; `feat/context-window-tiers`)** — replaces the
   global-only implementation below. `npm test`: **97 files / 1,022 tests PASS**;
   `npm run build` and `git diff --check`: **PASS**. Hermetic HTTP context gate:

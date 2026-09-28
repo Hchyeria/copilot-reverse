@@ -232,7 +232,7 @@ async function launchTui(): Promise<void> {
     for (const { alias, backend } of availableClaudeMappings(ids, claudeMap)) {
       if (!seen.has(alias)) { out.push(alias); seen.add(alias); }
       modelLabels[alias] = modelMapDisplay(alias, ids, claudeMap);
-      const long = discovery.choices.find((c) => c.upstreamId === backend && c.id.endsWith(LONG_CONTEXT_SUFFIX));
+      const long = discovery.choices.find((c) => c.upstreamId === backend && c.id !== c.upstreamId);
       const longAlias = `${alias}${LONG_CONTEXT_SUFFIX}`;
       if (long && !seen.has(longAlias)) {
         out.push(longAlias); seen.add(longAlias);
@@ -456,8 +456,8 @@ program.name("copilot-reverse").description("copilot-reverse: interactive Copilo
 program.command("context [tier]")
   .description("Explain per-model context selection (global tiers have been replaced)")
   .action((tier?: string) => {
-    if (tier !== undefined) throw new Error("Global context tiers were replaced: select a default or :long_context model in /model. No restart required.");
-    console.log("Select a default or :long_context entry in /model. Bare model IDs use default budgets. No restart required; re-run pi setup once to populate both entries.");
+    if (tier !== undefined) throw new Error("Global context tiers were replaced: select a default or long-context model (Astra: gpt-6-astra-1M) in /model. No restart required.");
+    console.log("Select a default or long-context entry in /model (Astra: gpt-6-astra-1M; other models: :long_context). Bare model IDs use default budgets. No restart required; re-run pi setup once to populate both entries.");
   });
 program.command("login")
   .description("Login with GitHub.com or GHE.com")
