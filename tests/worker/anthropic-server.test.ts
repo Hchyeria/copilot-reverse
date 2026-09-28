@@ -355,9 +355,9 @@ describe("worker Anthropic endpoint", () => {
     router.setModelLimits({ "gpt-5.6-sol": 1_100_000 });
     const res = await request(createWorkerApp(router, () => {})).get("/anthropic/v1/models");
     expect(res.body.data).toEqual([
-      { type: "model", id: "gpt-5.6-sol", display_name: "gpt-5.6-sol" },
+      { type: "model", id: "gpt-5.6-sol", display_name: "gpt-5.6-sol", context_window: 1_100_000 },
       { type: "model", id: "gpt-4o", display_name: "gpt-4o" },
-      { type: "model", id: "claude-opus-5[1m]", display_name: "Opus 5" },
+      { type: "model", id: "claude-opus-5[1m]", display_name: "Opus 5", context_window: 1_100_000 },
     ]);
   });
 

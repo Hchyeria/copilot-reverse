@@ -61,6 +61,7 @@ const router = new Router(
 // list before publishing or resolving them.
 const discoverModels = () => fetchModelDiscovery(tokenStore).then((discovery) => {
   router.setAvailableModels(discovery.ids, discovery.live);
+  router.setModelChoices(discovery.choices);
   router.setOneMModels(discovery.oneM);
   router.setModelLimits(discovery.limits);
   modelEndpoints = discovery.endpoints;

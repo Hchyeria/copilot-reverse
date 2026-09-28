@@ -3,6 +3,37 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-29 (Astra long-choice rename)** — public model ID is now `gpt-6-astra-1M`;
+  old `gpt-6-astra:long_context` remains accepted but is not listed. `npm test`:
+  **97 files / 1,022 tests PASS**; build and diff check **PASS**; hermetic HTTP **21 PASS**;
+  actual CLI/model-list checks **6 PASS**. New/old identities, budgets, real-name collision and
+  discovery-unavailable decoding covered. Live inference **SKIP**, Docker unavailable;
+  live CLI remains a pre-merge gate. No host client configuration changed.
+
+- **2026-09-29 (per-model context choices; `feat/context-window-tiers`)** — replaces the
+  global-only implementation below. `npm test`: **97 files / 1,022 tests PASS**;
+  `npm run build` and `git diff --check`: **PASS**. Hermetic HTTP context gate:
+  **20 assertions PASS**, including saved pi aliases with unavailable discovery,
+  alternating default/long/default on one worker and
+  upstream-ID preservation across chat, Responses and Anthropic. Real CLI gate: **6 PASS**,
+  including actual pi model-list loading of both 272K/1M definitions and untiered edge case.
+  CLI report: `/tmp/model-choices-cli-report.md`. No host configs or credentials changed.
+  Live Copilot CLI inference **SKIP** (no credentials mounted in the test environment);
+  full Docker matrix **NOT RUN** (Docker unavailable). **Live gate still required before merge.**
+
+- **2026-09-28 (context budget tiers; `feat/context-window-tiers`)** — `npm test`:
+  **96 files / 1,015 tests PASS**; `npm run build` **PASS**; `git diff --check` **PASS**.
+  `node e2e/docker/http-e2e.mjs --context-only`: **12 hermetic assertions PASS** (selected
+  default/long budget, HTTP picker badge, unchanged upstream model id; default-only metadata,
+  missing limits, and failed discovery never infer 1M). Review regressions also cover real Claude
+  identities colliding with compatibility aliases and conservative setup overwrites. Real project CLI flow
+  via `REPORT_PATH=/tmp/context-tier-cli-report.md bash e2e/docker/cli-e2e.sh`: **4 PASS**
+  (default → long → invalid-input preservation → default), isolated HOME and no inference.
+  Live Copilot/Claude/Codex CLI inference **SKIP**: no optional credentials mounted in the
+  test environment. Full Docker HTTP/CLI matrix **NOT RUN**: Docker unavailable on this host.
+  **Live Copilot CLI e2e remains a required pre-merge gate.** No host client configs changed;
+  smaller defaults are not claimed to fix the unconfirmed cause of the historical 408.
+
 - **2026-09-26 (manual request recording)** — `/record-start` / `/record-end`, private per-request
   artifacts, full upstream error/SSE bodies, and debounced batch writes. `npm test`: **84 files,
   780 tests PASS**. `npm run test:e2e`: **10 files, 49 tests PASS**. `npm run build`,

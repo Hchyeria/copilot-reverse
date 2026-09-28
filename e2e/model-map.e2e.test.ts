@@ -58,10 +58,10 @@ describe("E2E: Claude model compatibility map", () => {
     const openai = await request(worker).get("/openai/models");
 
     expect(anthropic.body.data.slice(-4)).toEqual([
-      { type: "model", id: "claude-fable-5-1[1m]", display_name: "Fable 5.1" },
-      { type: "model", id: "claude-opus-5[1m]", display_name: "Opus 5" },
-      { type: "model", id: "claude-sonnet-5[1m]", display_name: "Sonnet 5" },
-      { type: "model", id: "claude-haiku-4-5[1m]", display_name: "Haiku 4.5" },
+      { type: "model", id: "claude-fable-5-1[1m]", display_name: "Fable 5.1", context_window: 1_050_000 },
+      { type: "model", id: "claude-opus-5[1m]", display_name: "Opus 5", context_window: 1_100_000 },
+      { type: "model", id: "claude-sonnet-5[1m]", display_name: "Sonnet 5", context_window: 1_100_000 },
+      { type: "model", id: "claude-haiku-4-5[1m]", display_name: "Haiku 4.5", context_window: 1_100_000 },
     ]);
     expect(ids(openai.body)).toEqual(["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-sol-fast", "gpt-5.6-luna", "gpt-4o"]);
     expect(ids(anthropic.body)).not.toContain("claude-opus-4-8[1m]");
@@ -125,7 +125,7 @@ describe("E2E: Claude model compatibility map", () => {
     });
     const discovered = await request(worker).get("/anthropic/v1/models");
     expect(discovered.body.data.find((model: { id: string }) => model.id.startsWith("claude-sonnet-5"))).toEqual({
-      type: "model", id: "claude-sonnet-5", display_name: "Sonnet 5",
+      type: "model", id: "claude-sonnet-5", display_name: "Sonnet 5", context_window: 400_000,
     });
     expect(router.modelLimit("claude-sonnet-5")).toBe(400_000);
     expect(router.resolveModel("claude-opus-4-8[1m]")).toBe("claude-opus-4-8");

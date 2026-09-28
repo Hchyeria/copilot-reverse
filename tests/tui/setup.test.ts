@@ -25,12 +25,11 @@ describe("withClaude1mSuffix", () => {
   it("omits [1m] when the live window is sub-1M, even for a default-set member", () => {
     expect(withClaude1mSuffix("claude-opus-4.8", 200_000)).toBe("claude-opus-4-8");
   });
-  // When no window is known (discovery not resolved / no token) it falls back to the default set, so a
-  // known 1M model still badges rather than briefly sizing at 200K.
-  it("falls back to the default set when the window is unknown", () => {
-    expect(withClaude1mSuffix("claude-opus-4.8")).toBe("claude-opus-4-8[1m]");
-    expect(withClaude1mSuffix("claude-opus-5")).toBe("claude-opus-5[1m]");
-    expect(withClaude1mSuffix("claude-fable-5-1")).toBe("claude-fable-5-1[1m]");
+  it("does not infer long context when the window is unknown", () => {
+    expect(withClaude1mSuffix("claude-opus-4.8")).toBe("claude-opus-4-8");
+    expect(withClaude1mSuffix("claude-opus-5")).toBe("claude-opus-5");
+    expect(withClaude1mSuffix("claude-fable-5-1")).toBe("claude-fable-5-1");
+    expect(withClaude1mSuffix("gpt-6-astra[1m]", 272_000)).toBe("gpt-6-astra");
   });
 });
 
@@ -70,10 +69,10 @@ describe("claudeCopilotReverseEnv", () => {  it("writes the canonical dashed [1m
     expect(env.CLAUDE_CODE_ATTRIBUTION_HEADER).toBe("0");
     expect(env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY).toBe("1"); // /model picker is populated, not locked
   });
-  it("omits the window/suffix when it's unknown", () => {
+  it("uses a conservative window without a suffix when it's unknown", () => {
     const env = claudeCopilotReverseEnv("http://x", "k", "gpt-4o");
     expect(env.ANTHROPIC_MODEL).toBe("gpt-4o");
-    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("110000");
   });
   it("keeps a mapped setup pinned to its native Claude alias, not the GPT backend", () => {
     const env = claudeCopilotReverseEnv("http://x", "k", "claude-opus-5", 1_100_000);

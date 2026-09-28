@@ -1,3 +1,5 @@
+import { modelChoices, type ModelChoice } from "../../core/model-choices.js";
+import { contextBudget, type ContextMetadata, type ContextTier } from "../../core/context-tier.js";
 import { CopilotEndpointContractError } from "./token.js";
 import { copilotUrl, DEFAULT_COPILOT_INFERENCE_ORIGIN, readCopilotSession, type CopilotSessionSource } from "./session.js";
 
@@ -16,7 +18,7 @@ const DEFAULT_TIMEOUT_MS = 8000;
 // Only the slice of Copilot's /models payload we actually read. `name`, `vision` and
 // `max_output_tokens` are consumed solely by fetchCopilotModelCatalog (the pi setup needs a full model
 // definition, not just an id); every other selector below predates them and ignores them.
-interface RawModel {
+interface RawModel extends ContextMetadata {
   id?: string;
   name?: string;
   model_picker_enabled?: boolean;
@@ -84,31 +86,29 @@ export async function fetchModelReasoningSupport(token: TokenOrSessionSource, fe
   return out;
 }
 
-// Set of model ids whose advertised context window reaches ~1M tokens (dotted upstream form). Feeds the
-// outbound /v1/models mapper's is1M oracle, so the [1m] picker badge follows the REAL upstream window
-// instead of a hardcoded list — a new 1M model (claude-sonnet-5, or any future family) badges with zero
-// code changes. Threshold 800K matches clients.ts's context-window suffix rule (max_prompt_tokens 936K
-// also clears it). Returns an empty set on failure/timeout, so callers fall back to the default set.
-export async function fetchModelOneMSupport(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Set<string>> {
+// Model ids whose selected context budget reaches ~1M tokens (dotted upstream form).
+// Feeds the outbound model picker's is1M oracle; a standard-tier model must not receive a long-context
+// badge merely because its maximum window is large. Threshold 800K matches clients.ts's suffix rule.
+// Returns an empty set on failure/timeout.
+export async function fetchModelOneMSupport(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, tier: ContextTier = "default"): Promise<Set<string>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   const out = new Set<string>();
   if (!data) return out;
   for (const m of data) {
-    const w = m.capabilities?.limits?.max_context_window_tokens ?? m.capabilities?.limits?.max_prompt_tokens;
+    const w = contextBudget(m, tier);
     if (m.id && typeof w === "number" && w > 800_000) out.add(m.id);
   }
   return out;
 }
 
-// Map of model id -> its real input/context window, used to size auto-compaction per model and
+// Map of model id -> selected context budget, used to size auto-compaction per model and
 // to show the window in the picker. Returns {} on failure/timeout so callers fall back gracefully.
-export async function fetchModelLimits(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Record<string, number>> {
+export async function fetchModelLimits(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, tier: ContextTier = "default"): Promise<Record<string, number>> {
   const data = await getModels(token, fetchFn, timeoutMs);
   if (!data) return {};
   const out: Record<string, number> = {};
   for (const m of data) {
-    // Prefer the headline context window (so a 1M model shows as 1M); fall back to the prompt budget.
-    const limit = m.capabilities?.limits?.max_context_window_tokens ?? m.capabilities?.limits?.max_prompt_tokens;
+    const limit = contextBudget(m, tier);
     if (m.id && typeof limit === "number") out[m.id] = limit;
   }
   return out;
@@ -121,7 +121,7 @@ export async function fetchModelLimits(token: TokenOrSessionSource, fetchFn: typ
 export interface CopilotModelInfo {
   id: string;
   name: string;              // friendly upstream name ("Claude Opus 4.8"); falls back to the id
-  contextWindow: number;
+  contextWindow: number;    // selected client budget; tiered models use their prompt budget
   maxOutputTokens: number;
   vision: boolean;           // accepts image input
   reasoningEfforts: string[];// the effort enum this model accepts; empty = not a reasoning model
@@ -147,20 +147,25 @@ export async function fetchCopilotModelCatalog(token: TokenOrSessionSource, fetc
     if (m.capabilities?.type && m.capabilities.type !== "chat") continue;
     seen.add(m.id);
     const lim = m.capabilities?.limits;
-    out.push({
-      id: m.id,
-      name: m.name || m.id,
-      contextWindow: lim?.max_context_window_tokens ?? lim?.max_prompt_tokens ?? DEFAULT_CONTEXT_WINDOW,
-      maxOutputTokens: lim?.max_output_tokens ?? DEFAULT_MAX_OUTPUT,
-      vision: m.capabilities?.supports?.vision === true,
-      reasoningEfforts: m.capabilities?.supports?.reasoning_effort ?? [],
-    });
+    for (const choice of modelChoices({ ...m, id: m.id })) {
+      // Real upstream identities win a collision with a local suffix.
+      if (choice.id !== m.id && data.some((entry) => entry.id === choice.id)) continue;
+      out.push({
+        id: choice.id,
+        name: choice.name,
+        contextWindow: choice.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        maxOutputTokens: lim?.max_output_tokens ?? DEFAULT_MAX_OUTPUT,
+        vision: m.capabilities?.supports?.vision === true,
+        reasoningEfforts: m.capabilities?.supports?.reasoning_effort ?? [],
+      });
+    }
   }
   return out;
 }
 
 export interface CopilotModelDiscovery {
   ids: string[];
+  choices: ModelChoice[];
   // False means ids came from FALLBACK_MODELS after discovery failed. Compatibility aliases require
   // positive live evidence, so the Router may list these ids but must not synthesize mappings from them.
   live: boolean;
@@ -173,9 +178,9 @@ export interface CopilotModelDiscovery {
 
 // One upstream request supplies every model capability consumer. Besides avoiding five identical calls,
 // this guarantees aliases are filtered and badged from one coherent snapshot of the account's model list.
-export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<CopilotModelDiscovery> {
+export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, tier: ContextTier = "default"): Promise<CopilotModelDiscovery> {
   const data = await getModels(token, fetchFn, timeoutMs);
-  if (!data) return { ids: FALLBACK_MODELS, live: false, endpoints: {}, reasoning: new Set(), reasoningEfforts: {}, oneM: new Set(), limits: {} };
+  if (!data) return { ids: FALLBACK_MODELS, choices: [], live: false, endpoints: {}, reasoning: new Set(), reasoningEfforts: {}, oneM: new Set(), limits: {} };
   const ids = [...new Set(data.map((m) => m.id).filter((id): id is string => Boolean(id)))];
   const endpoints: Record<string, string[]> = {};
   const reasoning = new Set<string>();
@@ -189,11 +194,14 @@ export async function fetchModelDiscovery(token: TokenOrSessionSource, fetchFn: 
       reasoning.add(m.id);
       reasoningEfforts[m.id] = m.capabilities.supports.reasoning_effort;
     }
-    const limit = m.capabilities?.limits?.max_context_window_tokens ?? m.capabilities?.limits?.max_prompt_tokens;
+    const limit = contextBudget(m, tier);
     if (typeof limit === "number") {
       limits[m.id] = limit;
       if (limit > 800_000) oneM.add(m.id);
     }
   }
-  return { ids: ids.length ? ids : FALLBACK_MODELS, live: ids.length > 0, endpoints, reasoning, reasoningEfforts, oneM, limits };
+  const choices = data.flatMap((m) => m.id ? modelChoices({ ...m, id: m.id }) : [])
+    .filter((c) => c.id === c.upstreamId || !ids.includes(c.id))
+    .filter((c, index, all) => all.findIndex((other) => other.id === c.id) === index);
+  return { ids: ids.length ? ids : FALLBACK_MODELS, choices, live: ids.length > 0, endpoints, reasoning, reasoningEfforts, oneM, limits };
 }

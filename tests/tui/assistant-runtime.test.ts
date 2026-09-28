@@ -122,6 +122,23 @@ describe("assistant runtime (stubbed SDK transport, real /v1/messages)", () => {
     expect(window).toBe("64000"); // real per-model limit wins over the conservative default
   });
 
+  it("switches GPT context budgets between turns without restarting the assistant", async () => {
+    const windows: Array<string | undefined> = [];
+    const models: Array<string | undefined> = [];
+    const capturingQuery = ((params: { options?: { model?: string } }) => {
+      windows.push(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+      models.push(params.options?.model);
+      async function* gen(): AsyncGenerator<never> { /* no messages */ }
+      return gen();
+    }) as unknown as QueryFn;
+    const cfg: AssistantConfig = { client: {} as AssistantConfig["client"], workerBaseUrl: "http://127.0.0.1:1", apiKey: "k", model: "gpt-6-astra", modelLimits: { "gpt-6-astra": 272000, "gpt-6-astra:long_context": 1000000 } };
+    for (const model of ["gpt-6-astra", "gpt-6-astra:long_context", "gpt-6-astra"]) {
+      await runAssistantTurn({ ...cfg, model }, "hi", () => {}, capturingQuery);
+    }
+    expect(windows).toEqual(["272000", "1000000", "272000"]);
+    expect(models).toEqual(["gpt-6-astra", "gpt-6-astra:long_context", "gpt-6-astra"]);
+  });
+
   it("passes the AbortController into the query so the turn is interruptible", async () => {
     let seen: AbortController | undefined;
     const capturingQuery = ((params: { options?: { abortController?: AbortController } }) => {

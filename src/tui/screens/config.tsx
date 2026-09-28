@@ -1,3 +1,5 @@
+import { legacyContextId } from "../../core/model-choices.js";
+import { stripOneM } from "../../core/model-canonical.js";
 import React from "react";
 import { Box, Text } from "ink";
 import { Select } from "../components/select.js";
@@ -27,6 +29,8 @@ export function ConfigScreen({ info, model, clients, accessMode, onAction }: {
     <Box flexDirection="column" borderStyle="round" borderColor={theme.border} paddingX={1} marginBottom={1}>
       <Text color={theme.accent} bold>configuration</Text>
       {row("chat model", model)}
+      {row("context", legacyContextId(stripOneM(model)).endsWith(":long_context") ? "long context" : "default")}
+      <Text color={theme.muted}>select a context budget in /model; no restart required</Text>
       {row("OpenAI", info.openai)}
       {row("Anthropic", info.anthropic)}
       {row("ports", `supervisor ${info.supervisorPort} · worker ${info.workerPort}`)}

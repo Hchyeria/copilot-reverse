@@ -19,14 +19,13 @@ export const ONE_M_SUFFIX = "[1m]";
 //
 // The 1M decision is driven by the REAL context window we were handed (fetchModelLimits), in the same
 // ~800K..1.5M band agent-maestro uses, so a newly-shipped 1M model (claude-opus-5, or any future
-// family) gets [1m] with zero list edits. Only when the window is unknown (discovery not yet resolved /
-// no token) do we fall back to toCanonical's hardcoded DEFAULT_ONE_M_MODELS, so known models still badge.
+// family) gets [1m] with zero list edits. An unknown window is not evidence for long context.
 export function withClaude1mSuffix(model: string, contextWindow?: number): string {
   const inBand = contextWindow != null && contextWindow > 800_000 && contextWindow < 1_500_000;
   // Strip any suffix the caller already applied so we never double-append when re-canonicalizing.
   const bare = stripOneM(model);
-  if (bare.startsWith("claude-")) return toCanonical(bare, contextWindow != null ? () => inBand : undefined).id;
-  return inBand && !model.endsWith(ONE_M_SUFFIX) ? `${model}${ONE_M_SUFFIX}` : model;
+  if (bare.startsWith("claude-")) return toCanonical(bare, () => inBand).id;
+  return inBand ? `${bare}${ONE_M_SUFFIX}` : bare;
 }
 
 // Claude Code renders a model its BUILT-IN table doesn't know (one shipped after the CLI binary, e.g.
@@ -67,11 +66,14 @@ export function claudeCustomModelEnv(model: string, contextWindow?: number): Rec
 // Claude Code the selected model's real context window (via the [1m] model suffix and
 // CLAUDE_CODE_AUTO_COMPACT_WINDOW) so the client stops assuming the default 200K. Mirrors agent-maestro.
 export function claudeCopilotReverseEnv(base: string, apiKey: string, model: string, contextWindow?: number): Record<string, string> {
+  // Always overwrite the managed window: omitting it would retain an old 1M value on setup merge.
+  // Match the assistant's conservative offline budget until discovery can supply the selected tier.
+  contextWindow ??= 110_000;
   return {
     ANTHROPIC_BASE_URL: base,
     ANTHROPIC_API_KEY: apiKey,
     ANTHROPIC_MODEL: withClaude1mSuffix(model, contextWindow),
-    ...(contextWindow ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(contextWindow) } : {}),
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(contextWindow),
     // Friendly name + family alias for a model Claude Code's built-in table doesn't carry yet.
     ...claudeCustomModelEnv(model, contextWindow),
     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "80",

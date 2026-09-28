@@ -76,7 +76,93 @@ async function withWorker({ bindHost, port, mode, key }, fn) {
   } finally { child.kill(); await sleep(200); }
 }
 
+// Also runnable alone on a development machine: no fixed ports, daemon, HOME writes, or live quota.
+async function contextTierChecks() {
+  const { Router } = await import("../../dist/worker/router.js");
+  const { fetchModelDiscovery } = await import("../../dist/providers/copilot/models.js");
+  const { createWorkerApp } = await import("../../dist/worker/server.js");
+  const dummy = { name: "dummy", complete: async () => { throw new Error("unused"); }, async *stream() {} };
+  const tiered = { id: "claude-opus-4.8", capabilities: { limits: { max_context_window_tokens: 1_050_000 } },
+    billing: { token_prices: { default: { max_prompt_tokens: 272_000 }, long_context: { max_prompt_tokens: 1_000_000 } } } };
+  for (const [tier, budget] of [["default", 272_000], ["long_context", 1_000_000]]) {
+    const discovery = await fetchModelDiscovery("fixture", async () => new Response(JSON.stringify({ data: [tiered] })), undefined, tier);
+    const router = new Router([dummy], {});
+    router.setAvailableModels(discovery.ids);
+    router.setModelLimits(discovery.limits);
+    router.setOneMModels(discovery.oneM);
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    try {
+      const listed = (await jget(`http://${HOST}:${server.address().port}/anthropic/v1/models`)).j.data;
+      check(`${tier}: selected context budget`, router.modelLimit(tiered.id) === budget);
+      check(`${tier}: HTTP model badge follows selected tier`, listed[0].id.endsWith("[1m]") === (tier === "long_context"));
+      check(`${tier}: model resolves to unchanged upstream id`, router.resolveModel(listed[0].id) === tiered.id);
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
+  // One running worker exposes both budgets and accepts alternating choices without restart.
+  {
+    const astra = { ...tiered, id: "gpt-6-astra" };
+    const discovery = await fetchModelDiscovery("fixture", async () => new Response(JSON.stringify({ data: [astra, tiered] })));
+    const received = [];
+    const provider = { name: "fixture", async complete(req) {
+      received.push(req.model);
+      return { id: "fixture", model: req.model, content: [{ type: "text", text: "CHOICE_OK" }], stopReason: "end_turn" };
+    }, async *stream(req) { received.push(req.model); yield { kind: "text", delta: "CHOICE_OK" }; yield { done: true, finishReason: "stop" }; } };
+    const router = new Router([provider], {}, { claudeMapEnabled: true });
+    router.setAvailableModels(discovery.ids); router.setModelChoices(discovery.choices);
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    const base = `http://${HOST}:${server.address().port}`;
+    try {
+      const models = (await jget(`${base}/openai/models`)).j.data;
+      check("choices: GPT lists default and long budgets", models.find((m) => m.id === astra.id)?.context_window === 272_000 && models.find((m) => m.id === "gpt-6-astra-1M")?.context_window === 1_000_000);
+      const anthropic = (await jget(`${base}/anthropic/v1/models`)).j.data;
+      check("choices: Claude lists both budgets", anthropic.some((m) => m.id === "claude-opus-4-8") && anthropic.some((m) => m.id === "claude-opus-4-8:long_context[1m]"));
+      for (const suffix of ["", "-1M", "", ":long_context"]) {
+        const result = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: `${astra.id}${suffix}`, messages: [{ role: "user", content: "hi" }], stream: true }));
+        check(`choices: GPT ${suffix || "default"} streams through same worker`, result.s === 200 && result.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
+      }
+      const response = await jpost(`${base}/openai/responses`, JSON.stringify({ model: "gpt-6-astra-1M", input: "hi", stream: true }));
+      check("choices: Responses strips local suffix", response.s === 200 && response.t.includes("CHOICE_OK") && received.at(-1) === astra.id);
+      const claude = await jpost(`${base}/anthropic/v1/messages`, JSON.stringify({ model: "claude-opus-4-8:long_context[1m]", max_tokens: 16, messages: [{ role: "user", content: "hi" }], stream: true }));
+      check("choices: Anthropic strips local suffix", claude.s === 200 && claude.t.includes("CHOICE_OK") && received.at(-1) === tiered.id);
+      router.setModelChoices([]); router.setAvailableModels([], false);
+      const offline = await jpost(`${base}/openai/chat/completions`, JSON.stringify({ model: "gpt-6-astra-1M", messages: [{ role: "user", content: "hi" }], stream: true }));
+      check("choices: saved pi alias survives unavailable discovery", offline.s === 200 && received.at(-1) === astra.id);
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
+  const { updateModelBudgets } = await import("../../dist/tui/model-budgets.js");
+  const { resolveClaudeModelMap } = await import("../../dist/core/claude-model-map.js");
+  const { claudeCopilotReverseEnv } = await import("../../dist/tui/setup/clients.js");
+  for (const [name, data] of [
+    ["default-only", [{ ...tiered, id: "claude-sonnet-5", billing: { token_prices: { default: { max_prompt_tokens: 272_000 } } } }]],
+    ["missing-limit", [{ id: "gpt-6-astra" }]],
+    ["discovery-failed", null],
+  ]) {
+    const discovery = await fetchModelDiscovery("fixture", async () => data === null ? new Response(null, { status: 503 }) : new Response(JSON.stringify({ data })));
+    const router = new Router([dummy], {}, { claudeMapEnabled: true });
+    router.setAvailableModels(discovery.ids, discovery.live);
+    router.setModelLimits(discovery.limits);
+    router.setOneMModels(discovery.oneM);
+    const budgets = {};
+    updateModelBudgets(budgets, discovery.ids, discovery.limits, discovery.live, true, resolveClaudeModelMap());
+    const env = claudeCopilotReverseEnv("http://fixture", "fixture", "claude-sonnet-5", budgets["claude-sonnet-5"]);
+    check(`${name}: setup does not infer 1M`, !env.ANTHROPIC_MODEL.endsWith("[1m]") && env.CLAUDE_CODE_AUTO_COMPACT_WINDOW === (name === "default-only" ? "272000" : "110000"));
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    try {
+      const listed = (await jget(`http://${HOST}:${server.address().port}/anthropic/v1/models`)).j.data;
+      check(`${name}: HTTP picker never invents 1M`, listed.every((m) => !m.id.endsWith("[1m]")));
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
+}
+
 async function main() {
+  if (process.argv.includes("--context-only")) {
+    await contextTierChecks();
+    process.exitCode = failures ? 1 : 0;
+    return;
+  }
   const token = realToken();
   // A dummy token lets the worker boot and reject malformed/edge requests before any upstream call;
   // real round-trips only run if a real token was mounted.
@@ -132,6 +218,8 @@ async function main() {
     const { Router } = await import("../../dist/worker/router.js");
     const { readClaudeMapEnabled } = await import("../../dist/shared/prefs.js");
     const dummyProvider = { name: "dummy", complete: async () => { throw new Error("unused"); }, async *stream() {} };
+    // Tier metadata → discovery → real HTTP picker, without credentials or inference quota.
+    await contextTierChecks();
     check("Claude compatibility map defaults off in a fresh data dir", readClaudeMapEnabled(DATA_DIR) === false);
     const disabledMap = new Router([dummyProvider], {});
     disabledMap.setAvailableModels(["gpt-5.6-sol", "gpt-4o"], true);

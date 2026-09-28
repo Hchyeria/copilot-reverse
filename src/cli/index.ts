@@ -33,7 +33,9 @@ import { applyCodexToml } from "../tui/setup/codex-toml.js";
 import type { SetupClient } from "../tui/setup/wizard.js";
 import { claudeCopilotReverseEnv } from "../tui/setup/clients.js";
 import { stripOneM } from "../core/model-canonical.js";
-import { CLAUDE_MODEL_ALIASES, availableClaudeMappings, backendForClaudeAlias, modelMapDisplay, resolveClaudeModelMap } from "../core/claude-model-map.js";
+import { LONG_CONTEXT_SUFFIX } from "../core/model-choices.js";
+import { updateModelBudgets } from "../tui/model-budgets.js";
+import { availableClaudeMappings, backendForClaudeAlias, modelMapDisplay, resolveClaudeModelMap } from "../core/claude-model-map.js";
 import { bestModelMatch } from "../core/fuzzy.js";
 import { dataDir } from "../shared/paths.js";
 import { defaultConfig } from "../shared/config.js";
@@ -46,7 +48,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DEFAULT_MODEL = "gpt-4o"; // a valid Copilot model id; pass-through routing uses it as-is
 // Conservative context budget that drives the assistant's auto-compaction. Sized below the
 // common Copilot prompt window (gpt-4o ≈ 128K) so the engine compacts before the upstream
-// rejects an over-long turn. TODO: read each model's real max_prompt_tokens from /models.
+// rejects an over-long turn. Live selected-tier budgets supersede this fallback after discovery.
 const DEFAULT_MAX_INPUT_TOKENS = 110_000;
 
 // Process-level backstop. The TUI and the supervisor run in ONE process, so a stray throw or an
@@ -215,23 +217,33 @@ async function launchTui(): Promise<void> {
     const { ids, limits } = discovery;
     latestModels = ids;
     latestModelsLive = discovery.live;
-    Object.assign(modelLimits, limits); // so the picker shows windows and auto-compaction is sized
+    updateModelBudgets(modelLimits, ids, limits, discovery.live, readClaudeMapEnabled(dataDir()), claudeMap);
     for (const key of Object.keys(modelLabels)) delete modelLabels[key];
-    for (const alias of CLAUDE_MODEL_ALIASES) delete modelLimits[alias];
+    for (const choice of discovery.choices) {
+      if (choice.contextWindow !== undefined) modelLimits[choice.id] = choice.contextWindow;
+      modelLabels[choice.id] = choice.name;
+    }
+    const choiceIds = discovery.choices.length ? discovery.choices.map((c) => c.id) : ids;
     // A fallback list only keeps ordinary selection usable; it is not positive evidence that a mapped
     // backend exists. Match the worker's invariant and never advertise compatibility aliases offline.
-    if (!readClaudeMapEnabled(dataDir()) || !discovery.live) return ids;
-    const out = [...ids];
+    if (!readClaudeMapEnabled(dataDir()) || !discovery.live) return choiceIds;
+    const out = [...choiceIds];
     const seen = new Set(out.map(stripOneM));
     for (const { alias, backend } of availableClaudeMappings(ids, claudeMap)) {
       if (!seen.has(alias)) { out.push(alias); seen.add(alias); }
       modelLabels[alias] = modelMapDisplay(alias, ids, claudeMap);
-      if (limits[backend] !== undefined) modelLimits[alias] = limits[backend];
+      const long = discovery.choices.find((c) => c.upstreamId === backend && c.id !== c.upstreamId);
+      const longAlias = `${alias}${LONG_CONTEXT_SUFFIX}`;
+      if (long && !seen.has(longAlias)) {
+        out.push(longAlias); seen.add(longAlias);
+        modelLabels[longAlias] = `${modelLabels[alias]} · long context`;
+        if (long.contextWindow !== undefined) modelLimits[longAlias] = long.contextWindow;
+      }
     }
     return out;
   };
   // Pull each model's real context window in the background too, in case the picker never opens.
-  void fetchModelDiscovery(tokenStore).then((m) => Object.assign(modelLimits, m.limits)).catch(() => {});
+  void loadModels().catch(() => {});
 
   // Account facts for the status card: who's logged in (GitHub /user) + their Copilot plan (rides along
   // on the token exchange, so getEntitlement() is free once get() has run). The username is cached
@@ -263,7 +275,7 @@ async function launchTui(): Promise<void> {
   const applyClient = (clientKind: SetupClient, scope: Scope, model: string) => {
     if (clientKind === "claude") {
       const backend = readClaudeMapEnabled(dataDir()) && latestModelsLive ? backendForClaudeAlias(model, latestModels, claudeMap) : undefined;
-      const r = applyClaude(scope, claudeCopilotReverseEnv(anthropicBase, "copilot-reverse-local", model, modelLimits[backend ?? model]));
+      const r = applyClaude(scope, claudeCopilotReverseEnv(anthropicBase, "copilot-reverse-local", model, modelLimits[model] ?? modelLimits[backend ?? model]));
       writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), claude: true });
       return r;
     }
@@ -441,6 +453,12 @@ async function launchTui(): Promise<void> {
 
 const program = new Command();
 program.name("copilot-reverse").description("copilot-reverse: interactive Copilot proxy").version(APP_VERSION);
+program.command("context [tier]")
+  .description("Explain per-model context selection (global tiers have been replaced)")
+  .action((tier?: string) => {
+    if (tier !== undefined) throw new Error("Global context tiers were replaced: select a default or long-context model (Astra: gpt-6-astra-1M) in /model. No restart required.");
+    console.log("Select a default or long-context entry in /model (Astra: gpt-6-astra-1M; other models: :long_context). Bare model IDs use default budgets. No restart required; re-run pi setup once to populate both entries.");
+  });
 program.command("login")
   .description("Login with GitHub.com or GHE.com")
   .option("--type <type>", "github or ghecom")

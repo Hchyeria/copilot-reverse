@@ -110,9 +110,10 @@ you don't trade fidelity for a free backend.
   the real `output_config.effort` wire and forwarded upstream, so dialing reasoning up or down genuinely
   changes how hard the model thinks. (`curl -i` and you'll see the applied effort echoed back in an
   `x-copilot-reverse-effort` header.)
-- **🪟 True 1M-context models.** 1M-window models show up in Claude Code's native picker with the right
-  badge, and copilot-reverse writes the correct context-window hint so the client sizes its context bar
-  and auto-compaction to the *real* window — no more "context 100%" at 15%.
+- **🪟 Default and extended context budgets.** Tiered models default to Copilot's standard prompt
+  budget (e.g. Astra 272K), rather than automatically opting into long-context pricing. Select
+  the separate long-context model-list entry (`gpt-6-astra-1M` for Astra) for the larger budget; switch back to the bare model
+  for standard context, with no service restart. Generated pi configs include both entries. Untiered models keep their advertised window.
 - **🔀 Customizable Claude names for GPT-only accounts.** Run `/claude-map` to enable the feature and
   choose a live GPT backend for each current Claude identity. Defaults are Fable 5.1→gpt-6-astra,
   Opus 5→gpt-5.6-sol, Sonnet 5→gpt-5.6-sol-fast, and Haiku 4.5→gpt-5.6-luna. The editor lists every
@@ -199,6 +200,40 @@ model claude-opus-4.8  ·  daemon ready  ·  claude u:✓ p:○  codex u:○ p:�
 ---
 
 ## Troubleshooting
+
+**Choose default or extended context**
+
+Choose either entry in `/model` (GPT and Claude are both supported):
+
+```text
+gpt-6-astra                default · 272K
+gpt-6-astra-1M            long context · 1M
+```
+
+Bare model IDs always use the standard budget. Switch entries for the next turn; no proxy restart
+is required. `/setup-pi` generates both entries with independent `contextWindow` values, so pi's
+model picker switches budgets together with the model. Existing pi installations must re-run setup
+and reload the client once to import the new entries; host config files are **not automatically
+rewritten**. TUI `/model` saves the selected identity. Worker OpenAI/Anthropic lists expose both
+entries and `context_window` metadata. Clients must honor their own per-model budget configuration;
+merely changing a model ID cannot override a third-party client's global compaction setting.
+Claude/Codex setup writes the budget for the chosen entry.
+
+`gpt-6-astra-1M` is a **local alias**; both choices call the same Copilot `gpt-6-astra`
+model. The previous `gpt-6-astra:long_context` ID remains accepted for existing configs but is no
+longer listed. Other models retain their `:long_context` suffix. There is no upstream activation header. The earlier global `context default|long_context`
+command is retired and old global preferences do not override model choices.
+
+Budgets come from `/models` → `billing.token_prices.default/long_context.max_prompt_tokens`
+(or legacy `context_max`), bounded by the advertised window. Missing tier metadata retains the
+model's advertised limit; this is not a hardcoded 272K cap for every model. Setup conservatively
+uses the selected **prompt budget** as its client context/compaction hint; a client may compact
+earlier after reserving output space. Output-token caps remain unchanged. A long tier may expose
+less than 1,000,000 input tokens because of output reservation. The proxy does not reject or
+truncate manually submitted prompts just because they exceed the selected setup budget.
+
+Selecting a smaller budget does not guarantee elimination of 408/429 errors: the observed
+read-body timeout has not been established as rate limiting.
 
 **"context 100%" or `/compact` fails in Claude Code**
 Re-run `/setup-claude` and pick a **1M** model (e.g. `claude-opus-4.8 (1M)`). copilot-reverse writes
