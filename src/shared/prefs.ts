@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { ContextTier } from "../core/context-tier.js";
 import { sanitizeClaudeModelOverrides, type ClaudeModelOverrides } from "../core/claude-model-map.js";
 
 // Small user-preferences store (e.g. the chosen chat model, change-banner view counts), persisted
@@ -24,6 +25,15 @@ export function readChatModel(dir: string): string | null {
 
 export function writeChatModel(dir: string, model: string): void {
   write(dir, { ...read(dir), chatModel: model });
+}
+
+export function readContextTier(dir: string): ContextTier {
+  return read(dir).contextTier === "long_context" ? "long_context" : "default";
+}
+
+export function writeContextTier(dir: string, tier: ContextTier): void {
+  if (tier !== "default" && tier !== "long_context") throw new Error("context tier must be default or long_context");
+  write(dir, { ...read(dir), contextTier: tier });
 }
 
 export interface ClaudeMapSettings {

@@ -12,8 +12,8 @@ export interface RouterOptions {
 // M1: single provider. Model name is remapped to the provider's actual id.
 export class Router {
   private available: string[] = [];
-  // Dashed canonical ids advertising a ~1M window, from live discovery. Empty until the fetch resolves.
-  private oneM = new Set<string>();
+  // Undefined until discovery resolves; an explicitly empty set means the selected tier has no 1M models.
+  private oneM: Set<string> | undefined;
   private limits: Record<string, number> = {};
   private liveDiscovery = false;
   private claudeModelMap: ClaudeModelMap;
@@ -28,11 +28,9 @@ export class Router {
   setOneMModels(dottedIds: Iterable<string>): void {
     this.oneM = new Set([...dottedIds].map((id) => id.replace(/\./g, "-")));
   }
-  // Oracle for toCanonical: is this DASHED canonical id a 1M model? Uses the live set once discovery has
-  // populated it; before that (empty set) it falls back to the hardcoded defaults, so a known 1M model
-  // never briefly loses its badge during startup — mirrors the reasoning gate's "empty ⇒ default" guard.
+  // A discovered empty set must not re-enable long-context badges from hardcoded defaults.
   is1M(dashed: string): boolean {
-    return this.oneM.size ? this.oneM.has(dashed) : DEFAULT_ONE_M_MODELS.has(dashed);
+    return this.oneM ? this.oneM.has(dashed) : DEFAULT_ONE_M_MODELS.has(dashed);
   }
   // Real model ids only. OpenAI/Codex discovery must never see synthesized Claude aliases.
   listModels(): string[] { return this.available.length ? this.available : FALLBACK_MODELS; }

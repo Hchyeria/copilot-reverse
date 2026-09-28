@@ -76,7 +76,37 @@ async function withWorker({ bindHost, port, mode, key }, fn) {
   } finally { child.kill(); await sleep(200); }
 }
 
+// Also runnable alone on a development machine: no fixed ports, daemon, HOME writes, or live quota.
+async function contextTierChecks() {
+  const { Router } = await import("../../dist/worker/router.js");
+  const { fetchModelDiscovery } = await import("../../dist/providers/copilot/models.js");
+  const { createWorkerApp } = await import("../../dist/worker/server.js");
+  const dummy = { name: "dummy", complete: async () => { throw new Error("unused"); }, async *stream() {} };
+  const tiered = { id: "claude-opus-4.8", capabilities: { limits: { max_context_window_tokens: 1_050_000 } },
+    billing: { token_prices: { default: { max_prompt_tokens: 272_000 }, long_context: { max_prompt_tokens: 1_000_000 } } } };
+  for (const [tier, budget] of [["default", 272_000], ["long_context", 1_000_000]]) {
+    const discovery = await fetchModelDiscovery("fixture", async () => new Response(JSON.stringify({ data: [tiered] })), undefined, tier);
+    const router = new Router([dummy], {});
+    router.setAvailableModels(discovery.ids);
+    router.setModelLimits(discovery.limits);
+    router.setOneMModels(discovery.oneM);
+    const app = createWorkerApp(router, () => {});
+    const server = await new Promise((resolve) => { const s = app.listen(0, HOST, () => resolve(s)); });
+    try {
+      const listed = (await jget(`http://${HOST}:${server.address().port}/anthropic/v1/models`)).j.data;
+      check(`${tier}: selected context budget`, router.modelLimit(tiered.id) === budget);
+      check(`${tier}: HTTP model badge follows selected tier`, listed[0].id.endsWith("[1m]") === (tier === "long_context"));
+      check(`${tier}: model resolves to unchanged upstream id`, router.resolveModel(listed[0].id) === tiered.id);
+    } finally { await new Promise((resolve) => server.close(resolve)); }
+  }
+}
+
 async function main() {
+  if (process.argv.includes("--context-only")) {
+    await contextTierChecks();
+    process.exitCode = failures ? 1 : 0;
+    return;
+  }
   const token = realToken();
   // A dummy token lets the worker boot and reject malformed/edge requests before any upstream call;
   // real round-trips only run if a real token was mounted.
@@ -132,6 +162,8 @@ async function main() {
     const { Router } = await import("../../dist/worker/router.js");
     const { readClaudeMapEnabled } = await import("../../dist/shared/prefs.js");
     const dummyProvider = { name: "dummy", complete: async () => { throw new Error("unused"); }, async *stream() {} };
+    // Tier metadata → discovery → real HTTP picker, without credentials or inference quota.
+    await contextTierChecks();
     check("Claude compatibility map defaults off in a fresh data dir", readClaudeMapEnabled(DATA_DIR) === false);
     const disabledMap = new Router([dummyProvider], {});
     disabledMap.setAvailableModels(["gpt-5.6-sol", "gpt-4o"], true);

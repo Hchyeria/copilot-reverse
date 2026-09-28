@@ -16,7 +16,7 @@ import { makeOnChat } from "../tui/assistant/on-chat.js";
 import { readGitHubConnection, clearGitHubConnection, writeGitHubConnection } from "../shared/creds.js";
 import { writeWebIqKey, readWebIqKey, clearWebIqKey, readWebSearchMode, writeWebSearchMode, resolveWebSearchBackend } from "../shared/webiq-key.js";
 import { readClientSetup, writeClientSetup } from "../shared/client-setup.js";
-import { readChatModel, writeChatModel, shouldShowChange, markChangeShown, readClaudeMapEnabled, readClaudeMapSettings, writeClaudeMapSettings, type ClaudeMapSettings } from "../shared/prefs.js";
+import { readContextTier, writeContextTier, readChatModel, writeChatModel, shouldShowChange, markChangeShown, readClaudeMapEnabled, readClaudeMapSettings, writeClaudeMapSettings, type ClaudeMapSettings } from "../shared/prefs.js";
 import { readAccessMode, readAccessKey, setAccessMode as persistAccessMode, rotateAccessKey } from "../shared/network.js";
 import type { NetworkInfo } from "../tui/screens/network.js";
 import { CopilotAuthError } from "../providers/copilot/token.js";
@@ -46,7 +46,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const DEFAULT_MODEL = "gpt-4o"; // a valid Copilot model id; pass-through routing uses it as-is
 // Conservative context budget that drives the assistant's auto-compaction. Sized below the
 // common Copilot prompt window (gpt-4o ≈ 128K) so the engine compacts before the upstream
-// rejects an over-long turn. TODO: read each model's real max_prompt_tokens from /models.
+// rejects an over-long turn. Live selected-tier budgets supersede this fallback after discovery.
 const DEFAULT_MAX_INPUT_TOKENS = 110_000;
 
 // Process-level backstop. The TUI and the supervisor run in ONE process, so a stray throw or an
@@ -211,11 +211,12 @@ async function launchTui(): Promise<void> {
   // the next clean read, and a genuinely absent token surfaces as a 401 instead of a `token null` send.
   let tokenStore = createWorkerCopilotTokenStore(startupConnection, ghAuth);
   const loadModels = async () => {
-    const discovery = await fetchModelDiscovery(tokenStore);
+    const discovery = await fetchModelDiscovery(tokenStore, undefined, undefined, readContextTier(dataDir()));
     const { ids, limits } = discovery;
     latestModels = ids;
     latestModelsLive = discovery.live;
-    Object.assign(modelLimits, limits); // so the picker shows windows and auto-compaction is sized
+    for (const key of Object.keys(modelLimits)) delete modelLimits[key];
+    Object.assign(modelLimits, limits); // selected-tier budgets for setup and auto-compaction
     for (const key of Object.keys(modelLabels)) delete modelLabels[key];
     for (const alias of CLAUDE_MODEL_ALIASES) delete modelLimits[alias];
     // A fallback list only keeps ordinary selection usable; it is not positive evidence that a mapped
@@ -231,7 +232,7 @@ async function launchTui(): Promise<void> {
     return out;
   };
   // Pull each model's real context window in the background too, in case the picker never opens.
-  void fetchModelDiscovery(tokenStore).then((m) => Object.assign(modelLimits, m.limits)).catch(() => {});
+  void loadModels().catch(() => {});
 
   // Account facts for the status card: who's logged in (GitHub /user) + their Copilot plan (rides along
   // on the token exchange, so getEntitlement() is free once get() has run). The username is cached
@@ -277,7 +278,7 @@ async function launchTui(): Promise<void> {
   // pi setup: the picker needs each model's FULL upstream definition (window, output cap, vision,
   // reasoning levels), not just an id, because a models.json entry must state all of it up front.
   const setupPi = {
-    loadCatalog: async (): Promise<CopilotModelInfo[]> => fetchCopilotModelCatalog(tokenStore),
+    loadCatalog: async (): Promise<CopilotModelInfo[]> => fetchCopilotModelCatalog(tokenStore, undefined, undefined, readContextTier(dataDir())),
     apply: async (models: CopilotModelInfo[]) => {
       const r = applyPi(models, endpoint);
       writeClientSetup(dataDir(), { ...readClientSetup(dataDir()), pi: true });
@@ -372,6 +373,7 @@ async function launchTui(): Promise<void> {
         supervisorPort: cfg.supervisorPort,
         workerPort: cfg.workerPort,
         dataDir: dataDir(),
+        contextTier: readContextTier(dataDir()),
       },
       onModelChange: (m: string) => writeChatModel(dataDir(), m),
       pickModelOnStart: !persistedModel,
@@ -441,6 +443,14 @@ async function launchTui(): Promise<void> {
 
 const program = new Command();
 program.name("copilot-reverse").description("copilot-reverse: interactive Copilot proxy").version(APP_VERSION);
+program.command("context [tier]")
+  .description("Show or set the client context budget: default or long_context (opt-in)")
+  .action((tier?: string) => {
+    if (tier === undefined) { console.log(readContextTier(dataDir())); return; }
+    if (tier !== "default" && tier !== "long_context") throw new Error("context tier must be default or long_context");
+    writeContextTier(dataDir(), tier);
+    console.log(`Context tier: ${tier}. Restart copilot-reverse and re-run client setup to update existing client configs. No upstream model id or header is changed.`);
+  });
 program.command("login")
   .description("Login with GitHub.com or GHE.com")
   .option("--type <type>", "github or ghecom")

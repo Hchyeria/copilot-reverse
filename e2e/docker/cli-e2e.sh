@@ -25,11 +25,23 @@ check() { # check <name> <test-expr> <detail-for-report>
   if eval "$2"; then echo "  PASS $1"; record "$1" "PASS" "${3:-}"; else echo "  FAIL $1"; fails=$((fails+1)); record "$1" "FAIL" "${3:-}"; fi
 }
 
+# Real project CLI: context selection works offline and an invalid tier cannot overwrite it.
+# Isolated HOME means this case never rewrites the mounted credentials/client configuration.
+CONTEXT_HOME=$(mktemp -d)
+context_cli() { HOME="$CONTEXT_HOME" USERPROFILE="$CONTEXT_HOME" node dist/cli/index.js context "$@"; }
+check "context CLI defaults to default" '[ "$(context_cli)" = default ]' "fresh isolated HOME"
+check "context CLI opts into long_context" 'context_cli long_context >/dev/null && [ "$(context_cli)" = long_context ]' "persisted opt-in"
+check "context CLI rejects invalid tier without overwriting" '! context_cli 1m >/dev/null 2>&1 && [ "$(context_cli)" = long_context ]' "invalid 1m rejected"
+check "context CLI returns to default" 'context_cli default >/dev/null && [ "$(context_cli)" = default ]' "persisted default"
+rm -rf "$CONTEXT_HOME"
+
 # --- preconditions ------------------------------------------------------------------------------
 if [ ! -f /root/.copilot-reverse/creds.json ]; then
-  echo "no GitHub token mounted at /root/.copilot-reverse/creds.json — cannot run real CLI e2e"
-  echo "mount it read-only: -v \$HOME/.copilot-reverse/creds.json:/root/.copilot-reverse/creds.json:ro"
-  exit 3
+  echo "no GitHub token mounted — live CLI inference SKIPPED"
+  record "live Copilot CLI inference" "SKIP" "no optional GitHub credentials mounted"
+  mkdir -p "$(dirname "$REPORT_PATH")"
+  printf '# CLI e2e (offline)\n\n| Case | Result | Detail |\n|---|---|---|\n%b' "$rows" > "$REPORT_PATH"
+  [ "$fails" -eq 0 ] && exit 0 || exit 1
 fi
 CODEX_VER=$(codex --version 2>/dev/null | head -1)
 CLAUDE_VER=$(claude --version 2>/dev/null | head -1)

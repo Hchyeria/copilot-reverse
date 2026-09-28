@@ -3,6 +3,17 @@
 Latest run of the end-to-end suite. Regenerate after every code change with `npm run test:e2e`
 and update this file (paste the summary).
 
+- **2026-09-28 (context budget tiers; `feat/context-window-tiers`)** — `npm test`:
+  **96 files / 1,010 tests PASS**; `npm run build` **PASS**; `git diff --check` **PASS**.
+  `node e2e/docker/http-e2e.mjs --context-only`: **6 hermetic assertions PASS** (selected
+  default/long budget, HTTP picker badge, unchanged upstream model id). Real project CLI flow
+  via `REPORT_PATH=/tmp/context-tier-cli-report.md bash e2e/docker/cli-e2e.sh`: **4 PASS**
+  (default → long → invalid-input preservation → default), isolated HOME and no inference.
+  Live Copilot/Claude/Codex CLI inference **SKIP**: no optional credentials mounted in the
+  test environment. Full Docker HTTP/CLI matrix **NOT RUN**: Docker unavailable on this host.
+  **Live Copilot CLI e2e remains a required pre-merge gate.** No host client configs changed;
+  smaller defaults are not claimed to fix the unconfirmed cause of the historical 408.
+
 - **2026-09-26 (manual request recording)** — `/record-start` / `/record-end`, private per-request
   artifacts, full upstream error/SSE bodies, and debounced batch writes. `npm test`: **84 files,
   780 tests PASS**. `npm run test:e2e`: **10 files, 49 tests PASS**. `npm run build`,

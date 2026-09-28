@@ -110,9 +110,10 @@ you don't trade fidelity for a free backend.
   the real `output_config.effort` wire and forwarded upstream, so dialing reasoning up or down genuinely
   changes how hard the model thinks. (`curl -i` and you'll see the applied effort echoed back in an
   `x-copilot-reverse-effort` header.)
-- **🪟 True 1M-context models.** 1M-window models show up in Claude Code's native picker with the right
-  badge, and copilot-reverse writes the correct context-window hint so the client sizes its context bar
-  and auto-compaction to the *real* window — no more "context 100%" at 15%.
+- **🪟 Default and extended context budgets.** Tiered models default to Copilot's standard prompt
+  budget (e.g. Astra 272K), rather than automatically opting into long-context pricing. Select
+  `long_context` explicitly for the larger budget; model pickers, generated client configs and the
+  built-in assistant use the selected tier. Untiered models keep their advertised window.
 - **🔀 Customizable Claude names for GPT-only accounts.** Run `/claude-map` to enable the feature and
   choose a live GPT backend for each current Claude identity. Defaults are Fable 5.1→gpt-6-astra,
   Opus 5→gpt-5.6-sol, Sonnet 5→gpt-5.6-sol-fast, and Haiku 4.5→gpt-5.6-luna. The editor lists every
@@ -199,6 +200,31 @@ model claude-opus-4.8  ·  daemon ready  ·  claude u:✓ p:○  codex u:○ p:�
 ---
 
 ## Troubleshooting
+
+**Choose default or extended context**
+
+```sh
+copilot-reverse context               # show the saved tier; fresh installs use default
+copilot-reverse context default       # standard budget (Astra: 272K when advertised)
+copilot-reverse context long_context  # opt into the model's extended budget (~1M class)
+```
+
+The preference is saved in `~/.copilot-reverse/prefs.json`. Restart copilot-reverse (including
+any already-running daemon), then re-run `/setup-pi`, `/setup-codex` or `/setup-claude` and restart
+that client. Existing client configuration files are **not automatically rewritten**. `/config`
+shows the selected tier. This is a global preference across tiered models, not a model-name suffix
+or an upstream activation header.
+
+Budgets come from `/models` → `billing.token_prices.default/long_context.max_prompt_tokens`
+(or legacy `context_max`), bounded by the advertised window. Missing tier metadata retains the
+model's advertised limit; this is not a hardcoded 272K cap for every model. Setup conservatively
+uses the selected **prompt budget** as its client context/compaction hint; a client may compact
+earlier after reserving output space. Output-token caps remain unchanged. A long tier may expose
+less than 1,000,000 input tokens because of output reservation. The proxy does not reject or
+truncate manually submitted prompts just because they exceed the selected setup budget.
+
+Selecting a smaller budget does not guarantee elimination of 408/429 errors: the observed
+read-body timeout has not been established as rate limiting.
 
 **"context 100%" or `/compact` fails in Claude Code**
 Re-run `/setup-claude` and pick a **1M** model (e.g. `claude-opus-4.8 (1M)`). copilot-reverse writes
